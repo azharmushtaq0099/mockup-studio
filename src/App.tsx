@@ -584,6 +584,8 @@ export default function App(){
   const [toast,     setToast]    = useState<{msg:string;err?:boolean}|null>(null);
 
   const canvasRef   = useRef<HTMLCanvasElement>(null);
+  const reflRef     = useRef<HTMLCanvasElement>(null);
+  const mouseXRef   = useRef(0.5); // 0-1 normalised
   const glRef       = useRef<WebGLRenderingContext|null>(null);
   const plainRef    = useRef<WebGLProgram|null>(null);
   const chromaRef   = useRef<WebGLProgram|null>(null);
@@ -677,6 +679,24 @@ export default function App(){
         uInvW:1/W,uInvH:1/H,uSharp:e.sharp,uBright:e.bright,uContrast:e.contrast,
         uSat:e.sat,uTemp:e.temp,uVig:e.vignette,uBloom:e.bloom,uGrain:e.grain,uTime:t,
       });
+
+      // Reflection: draw flipped bottom strip onto reflection canvas
+      const refl = reflRef.current;
+      if (refl && mReadyRef.current) {
+        const rH = refl.height, rW = refl.width;
+        const ctx = refl.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, rW, rH);
+          // Flip vertically and offset slightly by mouse X for parallax
+          const shift = (mouseXRef.current - 0.5) * rW * 0.025;
+          ctx.save();
+          ctx.translate(shift, 0);
+          ctx.scale(1, -1);
+          // Source: bottom quarter of main canvas
+          ctx.drawImage(canvas, 0, H - rH * 2, W, rH * 2, 0, -rH, rW, rH);
+          ctx.restore();
+        }
+      }
 
       rafRef.current=requestAnimationFrame(frame);
     }
@@ -988,7 +1008,12 @@ export default function App(){
             </>}
           </aside>
 
-          <main className="canvas-area">
+          <main className="canvas-area"
+            onMouseMove={e=>{
+              const r=(e.currentTarget as HTMLElement).getBoundingClientRect();
+              mouseXRef.current=(e.clientX-r.left)/r.width;
+            }}>
+            <div style={{display:'flex',flexDirection:'column',alignItems:'center'}}>
             <div className="canvas-wrap" style={{width:csz.w,height:csz.h}}
               onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}>
               <canvas ref={canvasRef} width={native.w} height={native.h}
@@ -1012,6 +1037,22 @@ export default function App(){
                   <p>Grab a real device photo from the Library tab, or drag your own mockup file here.</p>
                 </div>
               )}
+            </div>
+            {/* Glass-table reflection — only when mockup loaded */}
+            {mockupSrc&&(
+              <canvas ref={reflRef}
+                width={native.w} height={Math.round(native.h*0.22)}
+                style={{
+                  display:'block',
+                  width:csz.w,
+                  height:Math.round(csz.h*0.22),
+                  opacity:0.16,
+                  WebkitMaskImage:'linear-gradient(to bottom, white 0%, transparent 100%)',
+                  maskImage:'linear-gradient(to bottom, white 0%, transparent 100%)',
+                  pointerEvents:'none',
+                  marginTop:1,
+                }}/>
+            )}
             </div>
           </main>
         </div>
