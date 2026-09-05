@@ -469,7 +469,15 @@ input[type=color]{width:32px;height:32px;border-radius:6px;border:1.5px solid va
 .preset-input:focus{border-color:var(--accent)}
 
 .canvas-area{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;
-  background:radial-gradient(ellipse at center, #0E0E1C 0%, #07070F 100%)}
+  position:relative;background:radial-gradient(ellipse at center, #0E0E1C 0%, #07070F 100%)}
+.zoom-pill{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:2px;
+  background:rgba(10,10,20,0.92);border:1px solid var(--border);
+  border-radius:20px;padding:3px 8px;box-shadow:0 4px 20px rgba(0,0,0,.6);z-index:50;user-select:none}
+.zoom-btn{background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;
+  padding:2px 7px;border-radius:12px;line-height:1;transition:all .1s}
+.zoom-btn:hover{background:var(--surface);color:var(--text)}
+.zoom-pct{font-size:11px;color:var(--text);cursor:pointer;min-width:38px;text-align:center;padding:0 4px}
 .canvas-wrap{position:relative;
   box-shadow:0 32px 100px rgba(0,0,0,.9),0 12px 36px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.05)}
 .pin-handle{position:absolute;width:11px;height:11px;border-radius:50%;
@@ -582,10 +590,15 @@ export default function App(){
   const [isRec,     setIsRec]    = useState(false);
   const [recTime,   setRecTime]  = useState(0);
   const [toast,     setToast]    = useState<{msg:string;err?:boolean}|null>(null);
+  const [zoom,      setZoom]     = useState(1.0);
+  const [pan,       setPan]      = useState({x:0,y:0});
 
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const reflRef     = useRef<HTMLCanvasElement>(null);
-  const mouseXRef   = useRef(0.5); // 0-1 normalised
+  const mouseXRef   = useRef(0.5);
+  const zoomRef     = useRef(1.0);
+  const panRef      = useRef({x:0,y:0});
+  const panStartRef = useRef<{mx:number;my:number;px:number;py:number}|null>(null);
   const glRef       = useRef<WebGLRenderingContext|null>(null);
   const plainRef    = useRef<WebGLProgram|null>(null);
   const chromaRef   = useRef<WebGLProgram|null>(null);
@@ -625,6 +638,8 @@ export default function App(){
   useEffect(()=>{enhRef.current=enhance},[enhance]);
   useEffect(()=>{trimInRef.current=trimIn},[trimIn]);
   useEffect(()=>{trimOutRef.current=trimOut},[trimOut]);
+  useEffect(()=>{zoomRef.current=zoom},[zoom]);
+  useEffect(()=>{panRef.current=pan},[pan]);
 
   // ── Init WebGL ──────────────────────────────────────────────────────────────
   useEffect(()=>{
@@ -781,16 +796,33 @@ export default function App(){
   },[]);
 
   const onPinDown=useCallback((i:number)=>(e:React.PointerEvent)=>{
-    e.preventDefault();e.stopPropagation();setActivePin(i);
+    e.preventDefault();e.stopPropagation(); // stop bubbling so canvas-wrap doesn't start pan
+    setActivePin(i);
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   },[]);
+  const onCanvasDown=useCallback((e:React.PointerEvent)=>{
+    // No pin active → start pan drag
+    panStartRef.current={mx:e.clientX,my:e.clientY,px:panRef.current.x,py:panRef.current.y};
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  },[]);
   const onMove=useCallback((e:React.PointerEvent)=>{
-    if(activePin===null) return;
-    const rect=canvasRef.current!.getBoundingClientRect();
-    const {w,h}=cszRef.current;
-    setPins(prev=>{const n=[...prev] as Quad;n[activePin]={x:Math.max(0,Math.min(w,e.clientX-rect.left)),y:Math.max(0,Math.min(h,e.clientY-rect.top))};return n;});
+    if(activePin!==null){
+      // Divide by zoom because getBoundingClientRect returns scaled coords
+      const rect=canvasRef.current!.getBoundingClientRect();
+      const z=zoomRef.current,{w,h}=cszRef.current;
+      setPins(prev=>{const n=[...prev] as Quad;n[activePin]={x:Math.max(0,Math.min(w,(e.clientX-rect.left)/z)),y:Math.max(0,Math.min(h,(e.clientY-rect.top)/z))};return n;});
+    } else if(panStartRef.current){
+      const {mx,my,px,py}=panStartRef.current;
+      setPan({x:px+e.clientX-mx,y:py+e.clientY-my});
+    }
   },[activePin]);
-  const onUp=useCallback(()=>setActivePin(null),[]);
+  const onUp=useCallback(()=>{setActivePin(null);panStartRef.current=null;},[]);
+  const onAreaWheel=useCallback((e:React.WheelEvent)=>{
+    e.preventDefault();
+    const factor=e.deltaY>0?0.88:1.14;
+    setZoom(z=>Math.max(0.2,Math.min(4,z*factor)));
+  },[]);
+  const fitZoom=useCallback(()=>{setZoom(1);setPan({x:0,y:0});},[]);
 
   const applyGrade=useCallback((g:GradeName)=>{setGrade(g);setEnhance(GRADES[g]);},[]);
 
@@ -1013,9 +1045,14 @@ export default function App(){
             onMouseMove={e=>{
               const r=(e.currentTarget as HTMLElement).getBoundingClientRect();
               mouseXRef.current=(e.clientX-r.left)/r.width;
-            }}>
-            <div style={{display:'flex',flexDirection:'column',alignItems:'center'}}>
-            <div className="canvas-wrap" style={{width:csz.w,height:csz.h}}
+            }}
+            onWheel={onAreaWheel}>
+            <div style={{display:'flex',flexDirection:'column',alignItems:'center',
+              transform:`translate(${pan.x}px,${pan.y}px)`,transition:'none'}}>
+            <div className="canvas-wrap" style={{width:csz.w,height:csz.h,
+              transform:`scale(${zoom})`,transformOrigin:'center top',
+              cursor:activePin!==null?'grabbing':'grab'}}
+              onPointerDown={onCanvasDown}
               onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}>
               <canvas ref={canvasRef} width={native.w} height={native.h}
                 style={{display:'block',width:csz.w,height:csz.h}}/>
@@ -1042,19 +1079,27 @@ export default function App(){
             {/* Glass-table reflection — only when mockup loaded */}
             {mockupSrc&&(
               <canvas ref={reflRef}
-                width={native.w} height={Math.round(native.h*0.22)}
+                width={native.w} height={Math.round(native.h*0.24)}
                 style={{
                   display:'block',
                   width:csz.w,
-                  height:Math.round(csz.h*0.22),
-                  opacity:0.28,
-                  filter:'blur(0.6px)',
-                  WebkitMaskImage:'linear-gradient(to bottom, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.45) 45%, transparent 100%)',
-                  maskImage:'linear-gradient(to bottom, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.45) 45%, transparent 100%)',
+                  height:Math.round(csz.h*0.24),
+                  opacity:0.38,
+                  WebkitMaskImage:'linear-gradient(to bottom, rgba(255,255,255,1) 0%, rgba(255,255,255,0.6) 35%, rgba(255,255,255,0.15) 70%, transparent 100%)',
+                  maskImage:'linear-gradient(to bottom, rgba(255,255,255,1) 0%, rgba(255,255,255,0.6) 35%, rgba(255,255,255,0.15) 70%, transparent 100%)',
                   pointerEvents:'none',
                   marginTop:0,
+                  transform:`scale(${zoom})`,transformOrigin:'center top',
                 }}/>
             )}
+            </div>
+            {/* Zoom pill */}
+            <div className="zoom-pill">
+              <button className="zoom-btn" onClick={()=>setZoom(z=>Math.max(0.2,z*0.8))}>−</button>
+              <span className="zoom-pct" title="Click to reset" onClick={fitZoom}>{Math.round(zoom*100)}%</span>
+              <button className="zoom-btn" onClick={()=>setZoom(z=>Math.min(4,z*1.25))}>+</button>
+              <div style={{width:1,height:14,background:'var(--border)',margin:'0 3px'}}/>
+              <button className="zoom-btn" style={{fontSize:10,padding:'2px 6px'}} onClick={fitZoom} title="Fit to screen">⊡</button>
             </div>
           </main>
         </div>
