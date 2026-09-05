@@ -681,19 +681,19 @@ export default function App(){
       });
 
       // Reflection: draw flipped bottom strip onto reflection canvas
+      gl.flush(); // ensure WebGL frame is fully written before readback
       const refl = reflRef.current;
       if (refl && mReadyRef.current) {
-        const rH = refl.height, rW = refl.width;
+        const rfH = refl.height, rfW = refl.width;
         const ctx = refl.getContext('2d');
         if (ctx) {
-          ctx.clearRect(0, 0, rW, rH);
-          // Flip vertically and offset slightly by mouse X for parallax
-          const shift = (mouseXRef.current - 0.5) * rW * 0.025;
+          ctx.clearRect(0, 0, rfW, rfH);
+          const shift = (mouseXRef.current - 0.5) * rfW * 0.03;
           ctx.save();
           ctx.translate(shift, 0);
           ctx.scale(1, -1);
-          // Source: bottom quarter of main canvas
-          ctx.drawImage(canvas, 0, H - rH * 2, W, rH * 2, 0, -rH, rW, rH);
+          // Source: bottom 44% of main canvas — includes device base + desk
+          ctx.drawImage(canvas, 0, H - rfH * 2, W, rfH * 2, 0, -rfH, rfW, rfH);
           ctx.restore();
         }
       }
@@ -738,7 +738,8 @@ export default function App(){
 
   function applyMockupSize(nW:number,nH:number){
     const avW=window.innerWidth-280,avH=window.innerHeight-80;
-    const scale=Math.min(avW/nW,avH/nH,1);
+    // Divide avH by 1.28 so canvas+reflection (22% extra) fits without overflow:hidden clipping
+    const scale=Math.min(avW/nW,(avH/1.28)/nH,1);
     const dW=Math.round(nW*scale),dH=Math.round(nH*scale);
     setNative({w:nW,h:nH}); setCsz({w:dW,h:dH}); setPins(defaultCorners(dW,dH));
   }
@@ -1046,11 +1047,12 @@ export default function App(){
                   display:'block',
                   width:csz.w,
                   height:Math.round(csz.h*0.22),
-                  opacity:0.16,
-                  WebkitMaskImage:'linear-gradient(to bottom, white 0%, transparent 100%)',
-                  maskImage:'linear-gradient(to bottom, white 0%, transparent 100%)',
+                  opacity:0.28,
+                  filter:'blur(0.6px)',
+                  WebkitMaskImage:'linear-gradient(to bottom, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.45) 45%, transparent 100%)',
+                  maskImage:'linear-gradient(to bottom, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.45) 45%, transparent 100%)',
                   pointerEvents:'none',
-                  marginTop:1,
+                  marginTop:0,
                 }}/>
             )}
             </div>
