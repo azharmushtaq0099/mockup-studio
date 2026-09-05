@@ -185,7 +185,8 @@ function coverVerts(sw:number,sh:number,dw:number,dh:number): Float32Array {
 // 32×32 subdivided mesh — ultra-smooth perspective warp, zero corner artefacts
 function pinVerts(pins: Quad, W: number, H: number, N=32): Float32Array | null {
   try {
-    const src: Quad = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
+    // V-flipped: UNPACK_FLIP_Y_WEBGL makes V=0 → image bottom, so map top corners to V=1
+    const src: Quad = [{x:0,y:1},{x:1,y:1},{x:1,y:0},{x:0,y:0}];
     const hFwd = computeHomography(src, pins);
     const hInv = invertHomography(hFwd);
     function uv2v(u:number,v:number): number[]|null {
