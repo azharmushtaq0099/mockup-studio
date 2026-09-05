@@ -695,21 +695,38 @@ export default function App(){
         uSat:e.sat,uTemp:e.temp,uVig:e.vignette,uBloom:e.bloom,uGrain:e.grain,uTime:t,
       });
 
-      // Reflection: draw flipped bottom strip onto reflection canvas
-      gl.flush(); // ensure WebGL frame is fully written before readback
+      // Reflection via gl.readPixels — guaranteed to work with WebGL canvas
+      gl.finish(); // block until GPU is done writing pixels
       const refl = reflRef.current;
       if (refl && mReadyRef.current) {
-        const rfH = refl.height, rfW = refl.width;
+        const rfH = refl.height, rfW = Math.min(refl.width, W);
         const ctx = refl.getContext('2d');
         if (ctx) {
+          // Read bottom rfH rows of the WebGL canvas (Y=0 is bottom in WebGL)
+          const pixels = new Uint8Array(rfW * rfH * 4);
+          gl.readPixels(0, 0, rfW, rfH, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const imgData = ctx.createImageData(rfW, rfH);
+          for (let row = 0; row < rfH; row++) {
+            // Flip: row 0 of imgData ← row rfH-1 of pixels (bottom→top)
+            const srcRow = rfH - 1 - row;
+            const s = srcRow * rfW * 4, d = row * rfW * 4;
+            imgData.data.set(pixels.subarray(s, s + rfW * 4), d);
+            // Gradient alpha: strong at top (row 0), fades to transparent
+            const fade = 1.0 - row / rfH;
+            const alpha = Math.round(fade * fade * 230);
+            for (let c = 0; c < rfW; c++) {
+              const bi = d + c * 4;
+              // 2× brightness boost + blue glass tint so dark pixels become visible
+              imgData.data[bi]   = Math.min(255, imgData.data[bi]   * 2);
+              imgData.data[bi+1] = Math.min(255, imgData.data[bi+1] * 2);
+              imgData.data[bi+2] = Math.min(255, imgData.data[bi+2] * 2 + 35);
+              imgData.data[bi+3] = alpha;
+            }
+          }
           ctx.clearRect(0, 0, rfW, rfH);
-          const shift = (mouseXRef.current - 0.5) * rfW * 0.03;
-          ctx.save();
-          ctx.translate(shift, 0);
-          ctx.scale(1, -1);
-          // Source: bottom 44% of main canvas — includes device base + desk
-          ctx.drawImage(canvas, 0, H - rfH * 2, W, rfH * 2, 0, -rfH, rfW, rfH);
-          ctx.restore();
+          // Subtle parallax: shift ImageData by mouse position
+          const shift = Math.round((mouseXRef.current - 0.5) * rfW * 0.025);
+          ctx.putImageData(imgData, shift, 0);
         }
       }
 
@@ -1112,17 +1129,17 @@ export default function App(){
             {/* Glass-table reflection — only when mockup loaded */}
             {mockupSrc&&(
               <canvas ref={reflRef}
-                width={native.w} height={Math.round(native.h*0.24)}
+                width={native.w} height={Math.round(native.h*0.26)}
                 style={{
                   display:'block',
                   width:csz.w,
-                  height:Math.round(csz.h*0.24),
-                  opacity:0.38,
-                  WebkitMaskImage:'linear-gradient(to bottom, rgba(255,255,255,1) 0%, rgba(255,255,255,0.6) 35%, rgba(255,255,255,0.15) 70%, transparent 100%)',
-                  maskImage:'linear-gradient(to bottom, rgba(255,255,255,1) 0%, rgba(255,255,255,0.6) 35%, rgba(255,255,255,0.15) 70%, transparent 100%)',
+                  height:Math.round(csz.h*0.26),
+                  opacity:0.7,
                   pointerEvents:'none',
                   marginTop:0,
                   transform:`scale(${zoom})`,transformOrigin:'center top',
+                  filter:'blur(1.5px) brightness(1.2)',
+                  mixBlendMode:'screen' as React.CSSProperties['mixBlendMode'],
                 }}/>
             )}
             </div>
