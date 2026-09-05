@@ -614,8 +614,9 @@ export default function App(){
   const rReadyRef   = useRef(false);
   const mIsVRef     = useRef(false);
   const rStaticRef  = useRef(false);
-  const pinsRef     = useRef<Quad>(pins);
-  const cszRef      = useRef(csz);
+  const pinsRef        = useRef<Quad>(pins);
+  const cszRef         = useRef(csz);
+  const activePinRef   = useRef<number|null>(null);
   const recNatRef   = useRef({w:1920,h:1080});
   const modeRef     = useRef<Mode>('manual');
   const keyClrRef   = useRef<[number,number,number]>([0,1,0]);
@@ -750,7 +751,8 @@ export default function App(){
       const vid=mockupVidRef.current; if(!vid) return;
       vid.src=src; vid.loop=true; vid.muted=true; vid.playsInline=true;
       vid.oncanplay=()=>{
-        applyMockupSize(vid.videoWidth||1920,vid.videoHeight||1080);
+        // Guard: applyMockupSize resets pins — only call once on initial load
+        if(!mReadyRef.current) applyMockupSize(vid.videoWidth||1920,vid.videoHeight||1080);
         uploadTex(glRef.current!,mTexRef.current!,vid);
         mReadyRef.current=true; vid.play().catch(()=>{});
       };
@@ -815,7 +817,7 @@ export default function App(){
 
   const onPinDown=useCallback((i:number)=>(e:React.PointerEvent)=>{
     e.preventDefault();e.stopPropagation(); // stop bubbling so canvas-wrap doesn't start pan
-    setActivePin(i);
+    activePinRef.current=i; setActivePin(i);
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   },[]);
   const onCanvasDown=useCallback((e:React.PointerEvent)=>{
@@ -824,17 +826,18 @@ export default function App(){
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   },[]);
   const onMove=useCallback((e:React.PointerEvent)=>{
-    if(activePin!==null){
-      // Divide by zoom because getBoundingClientRect returns scaled coords
+    const ap=activePinRef.current;
+    if(ap!==null){
+      // Use ref — no stale closure, no dropped frames between setActivePin and re-render
       const rect=canvasRef.current!.getBoundingClientRect();
       const z=zoomRef.current,{w,h}=cszRef.current;
-      setPins(prev=>{const n=[...prev] as Quad;n[activePin]={x:Math.max(0,Math.min(w,(e.clientX-rect.left)/z)),y:Math.max(0,Math.min(h,(e.clientY-rect.top)/z))};return n;});
+      setPins(prev=>{const n=[...prev] as Quad;n[ap]={x:Math.max(0,Math.min(w,(e.clientX-rect.left)/z)),y:Math.max(0,Math.min(h,(e.clientY-rect.top)/z))};return n;});
     } else if(panStartRef.current){
       const {mx,my,px,py}=panStartRef.current;
       setPan({x:px+e.clientX-mx,y:py+e.clientY-my});
     }
-  },[activePin]);
-  const onUp=useCallback(()=>{setActivePin(null);panStartRef.current=null;},[]);
+  },[]);
+  const onUp=useCallback(()=>{activePinRef.current=null;setActivePin(null);panStartRef.current=null;},[]);
   const onAreaWheel=useCallback((e:React.WheelEvent)=>{
     e.preventDefault();
     const factor=e.deltaY>0?0.88:1.14;
