@@ -480,15 +480,15 @@ input[type=color]{width:32px;height:32px;border-radius:6px;border:1.5px solid va
 .zoom-pct{font-size:11px;color:var(--text);cursor:pointer;min-width:38px;text-align:center;padding:0 4px}
 .canvas-wrap{position:relative;
   box-shadow:0 32px 100px rgba(0,0,0,.9),0 12px 36px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.05)}
-.pin-handle{position:absolute;width:11px;height:11px;border-radius:50%;
-  background:rgba(124,106,247,.9);border:2px solid rgba(255,255,255,.85);
-  transform:translate(-50%,-50%);cursor:grab;z-index:10;user-select:none;
-  touch-action:none;transition:all .12s}
-.pin-handle:hover{transform:translate(-50%,-50%) scale(1.5)}
-.pin-handle.active{background:var(--blue);cursor:grabbing;transform:translate(-50%,-50%) scale(1.7);
-  box-shadow:0 0 0 3px rgba(91,156,246,.4)}
-.pin-lbl{position:absolute;top:-14px;left:50%;transform:translateX(-50%);
-  font-size:8px;font-weight:700;color:rgba(255,255,255,.35);white-space:nowrap;pointer-events:none}
+/* L-bracket corner pins — sit outside the corner, never obscure the screen edge */
+.pin-corner{position:absolute;width:20px;height:20px;cursor:crosshair;z-index:10;
+  user-select:none;touch-action:none;box-sizing:border-box;}
+.pin-corner .arm-h,.pin-corner .arm-v{position:absolute;background:rgba(255,255,255,0.95);
+  transition:background .1s;}
+.pin-corner .arm-h{height:2px;width:12px;}
+.pin-corner .arm-v{width:2px;height:12px;}
+.pin-corner:hover .arm-h,.pin-corner:hover .arm-v{background:#5B9CF6;}
+.pin-corner.active .arm-h,.pin-corner.active .arm-v{background:#7C6AF7;}
 .empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
   justify-content:center;gap:10px;pointer-events:none;color:var(--muted)}
 .empty-ico{font-size:44px;opacity:.3}
@@ -676,7 +676,7 @@ export default function App(){
           const sx=dW>0?W/dW:1,sy=dH>0?H/dH:1;
           const np=pinsRef.current.map(p=>({x:p.x*sx,y:p.y*sy})) as Quad;
           const vt=pinVerts(np,W,H);
-          if(vt) drawQuad(gl,plain,rt,vt,{uEdge:1}); // soft feathered edges
+          if(vt) drawQuad(gl,plain,rt,vt,{uEdge:0}); // sharp pixel-perfect edges
         }
       } else {
         if(rReadyRef.current){
@@ -1058,16 +1058,49 @@ export default function App(){
                 style={{display:'block',width:csz.w,height:csz.h}}/>
               {mode==='manual'&&mockupSrc&&(
                 <svg style={{position:'absolute',inset:0,pointerEvents:'none'}} width={csz.w} height={csz.h}>
+                  {/* Thin outline of the mapped screen rect */}
                   <polyline points={[...pins,pins[0]].map(p=>`${p.x},${p.y}`).join(' ')}
-                    fill="none" stroke="rgba(124,106,247,.2)" strokeWidth="1" strokeDasharray="5 4"/>
+                    fill="none" stroke="rgba(255,255,255,.18)" strokeWidth="1"/>
                 </svg>
               )}
-              {mode==='manual'&&mockupSrc&&pins.map((p,i)=>(
-                <div key={i} className={`pin-handle${activePin===i?' active':''}`}
-                  style={{left:p.x,top:p.y}} onPointerDown={onPinDown(i)}>
-                  <div className="pin-lbl">{['TL','TR','BR','BL'][i]}</div>
-                </div>
-              ))}
+              {mode==='manual'&&mockupSrc&&pins.map((p,i)=>{
+                // L-bracket sits OUTSIDE the screen corner — never covers the actual edge point
+                // Each bracket extends 12px along the two edges meeting at this corner, offset 1px outward
+                const O=1; // outward offset in px
+                const A=12; // arm length
+                const offsets=[
+                  {left:p.x-O-A, top:p.y-O-A}, // TL: bracket opens bottom-right
+                  {left:p.x+O,   top:p.y-O-A}, // TR: bracket opens bottom-left
+                  {left:p.x+O,   top:p.y+O},   // BR: bracket opens top-left
+                  {left:p.x-O-A, top:p.y+O},   // BL: bracket opens top-right
+                ];
+                // Arm positions inside the 20×20 drag zone for each corner
+                const arms=[
+                  [{bottom:0,right:0},{bottom:0,right:0}],  // TL: H at bottom-right, V at bottom-right
+                  [{bottom:0,left:0},{bottom:0,left:0}],    // TR
+                  [{top:0,left:0},{top:0,left:0}],          // BR
+                  [{top:0,right:0},{top:0,right:0}],        // BL
+                ];
+                const hStyle=[
+                  {bottom:0,right:0,width:A,height:2},
+                  {bottom:0,left:0,width:A,height:2},
+                  {top:0,left:0,width:A,height:2},
+                  {top:0,right:0,width:A,height:2},
+                ];
+                const vStyle=[
+                  {bottom:0,right:0,width:2,height:A},
+                  {bottom:0,left:0,width:2,height:A},
+                  {top:0,left:0,width:2,height:A},
+                  {top:0,right:0,width:2,height:A},
+                ];
+                return(
+                  <div key={i} className={`pin-corner${activePin===i?' active':''}`}
+                    style={{...offsets[i]}} onPointerDown={onPinDown(i)}>
+                    <div className="arm-h" style={hStyle[i]}/>
+                    <div className="arm-v" style={vStyle[i]}/>
+                  </div>
+                );
+              })}
               {!mockupSrc&&(
                 <div className="empty" style={{width:csz.w,height:csz.h}}>
                   <div className="empty-ico">🖼️</div>
