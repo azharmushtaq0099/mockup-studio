@@ -326,6 +326,7 @@ type Preset={name:string;mode:Mode;grade:GradeName;enhance:Enhance;keyColor:stri
 type Mode='manual'|'auto';
 type ExportFmt='png'|'webm';
 type Quality='high'|'ultra';
+type ExportRatio='16:9'|'9:16'|'1:1';
 
 // ─── Library ─────────────────────────────────────────────────────────────────
 
@@ -663,6 +664,7 @@ export default function App(){
   const [showExp,   setShowExp]  = useState(false);
   const [expFmt,    setExpFmt]   = useState<ExportFmt>('png');
   const [quality,   setQuality]  = useState<Quality>('high');
+  const [exportRatio,setExportRatio]=useState<ExportRatio>('16:9');
   const [isRec,     setIsRec]    = useState(false);
   const [recTime,   setRecTime]  = useState(0);
   const [toast,     setToast]    = useState<{msg:string;err?:boolean}|null>(null);
@@ -728,7 +730,9 @@ export default function App(){
   const audioElRef    = useRef<HTMLAudioElement|null>(null);
   const audioCtxRef   = useRef<AudioContext|null>(null);
   const audioVolRef   = useRef(0.8);
-  const videoTrackRef = useRef<{requestFrame():void}|null>(null);
+  const videoTrackRef  = useRef<{requestFrame():void}|null>(null);
+  const outCanvasRef   = useRef<HTMLCanvasElement|null>(null);
+  const exportRatioRef = useRef<ExportRatio>('16:9');
 
   useEffect(()=>{pinsRef.current=pins},[pins]);
   useEffect(()=>{cszRef.current=csz},[csz]);
@@ -749,6 +753,7 @@ export default function App(){
   useEffect(()=>{chromaKeyRef.current=chromaKey},[chromaKey]);
   useEffect(()=>{textItemsRef.current=textItems},[textItems]);
   useEffect(()=>{audioVolRef.current=audioVol; if(audioElRef.current) audioElRef.current.volume=audioVol;},[audioVol]);
+  useEffect(()=>{ exportRatioRef.current=exportRatio; },[exportRatio]);
 
   // ── Init WebGL ──────────────────────────────────────────────────────────────
   useEffect(()=>{
@@ -910,6 +915,29 @@ export default function App(){
           // Subtle parallax: shift ImageData by mouse position
           const shift = Math.round((mouseXRef.current - 0.5) * rfW * 0.025);
           ctx.putImageData(imgData, shift, 0);
+        }
+      }
+
+      // Composite to output canvas (ratio conversion for Reels / Square)
+      const ratio=exportRatioRef.current;
+      if(ratio!=='16:9'){
+        if(!outCanvasRef.current) outCanvasRef.current=document.createElement('canvas');
+        const oc=outCanvasRef.current;
+        if(ratio==='9:16'&&(oc.width!==1080||oc.height!==1920)){oc.width=1080;oc.height=1920;}
+        if(ratio==='1:1'&&(oc.width!==1080||oc.height!==1080)){oc.width=1080;oc.height=1080;}
+        const octx=oc.getContext('2d');
+        const glc=canvasRef.current;
+        if(octx&&glc){
+          const dw=oc.width,dh=oc.height,sa=W/H,da=dw/dh;
+          // Blurred background — slightly oversized to hide blur-edge artifacts
+          octx.save();
+          octx.filter='blur(28px) brightness(0.28) saturate(1.6)';
+          octx.drawImage(glc,-60,-60,dw+120,dh+120);
+          octx.restore();
+          // Main content centered, aspect-correct
+          let mw:number,mh:number;
+          if(sa>da){mw=dw;mh=Math.round(dw/sa);}else{mh=dh;mw=Math.round(dh*sa);}
+          octx.drawImage(glc,Math.round((dw-mw)/2),Math.round((dh-mh)/2),mw,mh);
         }
       }
 
@@ -1084,9 +1112,13 @@ export default function App(){
              :MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
     const ext=mime.startsWith('video/mp4')?'mp4':'webm';
     const bitrate=quality==='ultra'?80_000_000:40_000_000;
+    // Use output canvas for ratio conversion (9:16 / 1:1), native canvas for 16:9
+    const ratio=exportRatioRef.current;
+    let recordCanvas:HTMLCanvasElement=c;
+    if(ratio!=='16:9'&&outCanvasRef.current) recordCanvas=outCanvasRef.current;
     // captureStream(0) + requestFrame() gives frame-perfect sync — no dropped/duplicate frames
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const canvasStream=(c as any).captureStream(0) as MediaStream;
+    const canvasStream=(recordCanvas as any).captureStream(0) as MediaStream;
     videoTrackRef.current=(canvasStream.getVideoTracks()[0] as unknown as {requestFrame():void});
     let recStream=canvasStream;
     const audioEl=audioElRef.current;
@@ -1568,7 +1600,9 @@ export default function App(){
               <button className="modal-x" onClick={()=>setShowExp(false)}>✕</button>
             </div>
             <div className="modal-body">
-              <div className="m-stat"><span>Resolution</span><strong>{native.w} × {native.h}</strong></div>
+              <div className="m-stat"><span>Resolution</span><strong>
+                {exportRatio==='9:16'?'1080 × 1920':exportRatio==='1:1'?'1080 × 1080':`${native.w} × ${native.h}`}
+              </strong></div>
               <div className="m-stat"><span>Grade</span><strong>{grade==='none'?'None':grade.charAt(0).toUpperCase()+grade.slice(1)}</strong></div>
               {recDur>0&&<div className="m-stat"><span>Clip</span><strong>{fmt(Math.round(trimIn*recDur))} – {fmt(Math.round(trimOut*recDur))}</strong></div>}
               <div className="m-lbl">Format</div>
@@ -1577,16 +1611,33 @@ export default function App(){
                 <div className={`fmt-tab${expFmt==='webm'?' active':''}`} onClick={()=>setExpFmt('webm')}>🎬 WebM Video</div>
               </div>
               {expFmt==='webm'&&<>
+                <div className="m-lbl">Aspect Ratio</div>
+                <div className="q-row">
+                  {(['16:9','9:16','1:1'] as ExportRatio[]).map(r=>(
+                    <div key={r} className={`q-btn${exportRatio===r?' active':''}`} onClick={()=>setExportRatio(r)}
+                      style={{flexDirection:'column',alignItems:'center'}}>
+                      <span style={{fontSize:12,fontWeight:700}}>{r}</span>
+                      <span style={{fontSize:8,opacity:.6,marginTop:2}}>
+                        {r==='16:9'?'LinkedIn · Twitter':r==='9:16'?'Reels · TikTok · Shorts':'Instagram'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {exportRatio!=='16:9'&&(
+                  <div className="q-note" style={{color:'var(--accent)'}}>
+                    ✦ Blur background auto-added — your 16:9 mockup centered in frame
+                  </div>
+                )}
                 <div className="m-lbl">Quality</div>
                 <div className="q-row">
                   <div className={`q-btn${quality==='high'?' active':''}`} onClick={()=>setQuality('high')}>
-                    High<br/><span style={{fontSize:9,opacity:.6}}>30 Mbps VP9</span>
+                    High<br/><span style={{fontSize:9,opacity:.6}}>40 Mbps</span>
                   </div>
                   <div className={`q-btn${quality==='ultra'?' active':''}`} onClick={()=>setQuality('ultra')}>
-                    Ultra<br/><span style={{fontSize:9,opacity:.6}}>60 Mbps VP9</span>
+                    Ultra<br/><span style={{fontSize:9,opacity:.6}}>80 Mbps</span>
                   </div>
                 </div>
-                <div className="q-note">60 fps · native res · grade baked in · starts from trim point</div>
+                <div className="q-note">60 fps · grade baked in · starts from trim point</div>
               </>}
               {expFmt==='png'
                 ?<button className="btn btn-export" style={{width:'100%',justifyContent:'center',padding:10}} onClick={doExportPNG}>Export PNG</button>
