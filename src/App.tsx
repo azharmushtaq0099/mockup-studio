@@ -835,7 +835,7 @@ export default function App(){
           const scl=W/dw;
           for(const item of textItemsRef.current){
             ctx2d.save();
-            ctx2d.font=`${item.italic?'italic ':''}${item.bold?'bold ':''} ${Math.round(item.size*scl)}px ${item.family}`;
+            ctx2d.font=`${item.italic?'italic ':''}${item.bold?'bold ':''} ${Math.round(item.size*scl)}px ${item.family},'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
             ctx2d.fillStyle=item.color;
             ctx2d.shadowColor='rgba(0,0,0,0.55)'; ctx2d.shadowBlur=Math.round(4*scl);
             ctx2d.fillText(item.text,item.x*W,item.y*H);
@@ -971,7 +971,7 @@ export default function App(){
 
   const addText=useCallback(()=>{
     const id=Date.now().toString();
-    setTextItems(p=>[...p,{id,text:'Your text',x:0.5,y:0.15,size:36,color:'#ffffff',family:'Inter, sans-serif',bold:false,italic:false}]);
+    setTextItems(p=>[...p,{id,text:'Your text',x:0.5,y:0.15,size:48,color:'#ffffff',family:"'Bebas Neue', sans-serif",bold:false,italic:false}]);
     setSelTextId(id);
   },[]);
   const updateText=useCallback((id:string,key:keyof TextItem,val:unknown)=>{
@@ -1229,12 +1229,31 @@ export default function App(){
                           <select value={item.family} onChange={e=>updateText(item.id,'family',e.target.value)}
                             style={{width:'100%',marginBottom:6,fontSize:11,padding:'3px 6px',
                               background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',borderRadius:4}}>
-                            <option value="Inter, sans-serif">Inter</option>
-                            <option value="'Arial Black', sans-serif">Arial Black</option>
-                            <option value="Georgia, serif">Georgia</option>
-                            <option value="'Playfair Display', Georgia, serif">Playfair Display</option>
-                            <option value="'Courier New', monospace">Courier New</option>
-                            <option value="system-ui, sans-serif">System UI</option>
+                            <optgroup label="── Reel / Bold ──">
+                              <option value="'Bebas Neue', sans-serif">Bebas Neue</option>
+                              <option value="'Anton', sans-serif">Anton</option>
+                              <option value="'Bungee', sans-serif">Bungee</option>
+                              <option value="'Bangers', cursive">Bangers</option>
+                              <option value="'Racing Sans One', sans-serif">Racing Sans One</option>
+                              <option value="'Oswald', sans-serif">Oswald Heavy</option>
+                              <option value="'Montserrat', sans-serif">Montserrat Black</option>
+                              <option value="'Black Han Sans', sans-serif">Black Han Sans</option>
+                            </optgroup>
+                            <optgroup label="── Handwriting ──">
+                              <option value="'Permanent Marker', cursive">Permanent Marker</option>
+                              <option value="'Pacifico', cursive">Pacifico</option>
+                              <option value="'Satisfy', cursive">Satisfy</option>
+                              <option value="'Righteous', cursive">Righteous</option>
+                            </optgroup>
+                            <optgroup label="── Elegant ──">
+                              <option value="'Cinzel', serif">Cinzel</option>
+                              <option value="Georgia, serif">Georgia</option>
+                            </optgroup>
+                            <optgroup label="── Clean ──">
+                              <option value="'Inter', sans-serif">Inter</option>
+                              <option value="'Roboto', sans-serif">Roboto</option>
+                              <option value="'Arial Black', sans-serif">Arial Black</option>
+                            </optgroup>
                           </select>
                           <button className="btn btn-ghost"
                             style={{width:'100%',justifyContent:'center',fontSize:10.5,color:'#e05050'}}
