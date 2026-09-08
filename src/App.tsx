@@ -10,11 +10,12 @@ varying vec3 vUVW;
 void main() { vUVW = aUVW; gl_Position = vec4(aPos, 0.0, 1.0); }
 `;
 
-// uEdge=1 → soft feather at UV edges (eliminates hard cut lines in manual mode)
+// uEdge=1 → soft feather at UV edges; uOpacity < 1 for ghost/layer transparency
 const FRAG_PLAIN = `
 precision mediump float;
 uniform sampler2D uTex;
 uniform float uEdge;
+uniform float uOpacity;
 varying vec3 vUVW;
 void main() {
   vec2 uv = vUVW.xy / vUVW.z;
@@ -25,6 +26,8 @@ void main() {
               smoothstep(0.0, f, uv.y)   * smoothstep(0.0, f, 1.0-uv.y);
     c.a *= a;
   }
+  float op = uOpacity > 0.001 ? uOpacity : 1.0;
+  c.a *= op;
   gl_FragColor = c;
 }
 `;
@@ -54,6 +57,62 @@ void main() {
   else
     col.r = mix(col.r, min(col.r, max(col.g, col.b)), spill * 0.85);
   gl_FragColor = vec4(col, alpha);
+}
+`;
+
+// Single-pass two-texture blend — always fully opaque output, zero bleed possible.
+// Outside pin quad → mockup. Inside → mix(mockup, recording, 1-luma): dark screen shows
+// recording, bright pixels (hand/bezel) stay as mockup.
+// uRec bound to TEXTURE1. uRecCrop = vec4(u0,u1,v0,v1) for cover-scale recording UV.
+const FRAG_BLEND = `
+precision mediump float;
+uniform sampler2D uTex;
+uniform sampler2D uRec;
+uniform vec2 uQ0,uQ1,uQ2,uQ3;
+uniform float uLuma;
+uniform float uLumaSoft;
+uniform float uChroma;
+uniform vec4 uRecCrop;
+varying vec3 vUVW;
+float cx(vec2 a,vec2 b){return a.x*b.y-a.y*b.x;}
+void main(){
+  vec2 uv=vUVW.xy/vUVW.z;
+  vec4 mock=texture2D(uTex,uv);
+  float d0=cx(uQ1-uQ0,uv-uQ0),d1=cx(uQ2-uQ1,uv-uQ1);
+  float d2=cx(uQ3-uQ2,uv-uQ2),d3=cx(uQ0-uQ3,uv-uQ3);
+  bool inside=(d0>=0.0&&d1>=0.0&&d2>=0.0&&d3>=0.0)||(d0<=0.0&&d1<=0.0&&d2<=0.0&&d3<=0.0);
+  if(!inside){gl_FragColor=vec4(mock.rgb,1.0);return;}
+  float t;
+  if(uChroma>0.001){
+    float ge=mock.g-max(mock.r,mock.b);
+    t=smoothstep(max(0.0,uChroma-uLumaSoft),uChroma+uLumaSoft,ge);
+  } else {
+    float lum=dot(mock.rgb,vec3(0.2126,0.7152,0.0722));
+    t=1.0-smoothstep(max(0.0,uLuma-uLumaSoft),uLuma+uLumaSoft,lum);
+  }
+  vec2 ruv=vec2(uRecCrop.x+uv.x*(uRecCrop.y-uRecCrop.x),uRecCrop.z+uv.y*(uRecCrop.w-uRecCrop.z));
+  vec4 rec=texture2D(uRec,ruv);
+  gl_FragColor=vec4(mix(mock.rgb,rec.rgb,t),1.0);
+}
+`;
+
+// Mockup with screen area punched out — lets recording show through, keeps foreground (hand) on top
+const FRAG_CUTOUT = `
+precision mediump float;
+uniform sampler2D uTex;
+uniform vec2 uQ0,uQ1,uQ2,uQ3;
+uniform float uOpacity;
+varying vec3 vUVW;
+float cx(vec2 a,vec2 b){return a.x*b.y-a.y*b.x;}
+void main(){
+  vec2 uv=vUVW.xy/vUVW.z;
+  float d0=cx(uQ1-uQ0,uv-uQ0),d1=cx(uQ2-uQ1,uv-uQ1);
+  float d2=cx(uQ3-uQ2,uv-uQ2),d3=cx(uQ0-uQ3,uv-uQ3);
+  if((d0>=0.0&&d1>=0.0&&d2>=0.0&&d3>=0.0)||(d0<=0.0&&d1<=0.0&&d2<=0.0&&d3<=0.0)) discard;
+  vec4 col=texture2D(uTex,uv);
+  float op = uOpacity > 0.001 ? uOpacity : 1.0;
+  col.a *= op;
+  gl_FragColor=col;
 }
 `;
 
@@ -115,7 +174,9 @@ function mkProgram(gl: WebGLRenderingContext, frag: string) {
   const p = gl.createProgram()!;
   gl.attachShader(p, mkShader(gl,gl.VERTEX_SHADER,VERT));
   gl.attachShader(p, mkShader(gl,gl.FRAGMENT_SHADER,frag));
-  gl.linkProgram(p); return p;
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) console.error('GL link:',gl.getProgramInfoLog(p));
+  return p;
 }
 function mkTex(gl: WebGLRenderingContext): WebGLTexture {
   const t = gl.createTexture()!;
@@ -135,6 +196,7 @@ function uploadTex(gl: WebGLRenderingContext, tex: WebGLTexture, src: TexImageSo
 function drawQuad(
   gl: WebGLRenderingContext, prog: WebGLProgram, tex: WebGLTexture,
   verts: Float32Array, uniforms?: Record<string, number | number[]>,
+  tex2?: WebGLTexture | null,
 ) {
   gl.useProgram(prog);
   const buf = gl.createBuffer()!;
@@ -145,9 +207,15 @@ function drawQuad(
   gl.vertexAttribPointer(aUVW,3,gl.FLOAT,false,20,8);
   gl.uniform1i(gl.getUniformLocation(prog,'uTex'),0);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+  if(tex2){
+    gl.uniform1i(gl.getUniformLocation(prog,'uRec'),1);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,tex2);
+    gl.activeTexture(gl.TEXTURE0);
+  }
   if (uniforms) for (const [k,v] of Object.entries(uniforms)) {
     const loc = gl.getUniformLocation(prog,k);
     if (typeof v === 'number') gl.uniform1f(loc,v);
+    else if (v.length===4) gl.uniform4fv(loc,v);
     else if (v.length===3) gl.uniform3fv(loc,v);
     else if (v.length===2) gl.uniform2fv(loc,v);
   }
@@ -180,6 +248,12 @@ function coverVerts(sw:number,sh:number,dw:number,dh:number): Float32Array {
   if(sa>da){const m=(1-da/sa)/2;u0=m;u1=1-m;}
   else if(sa<da){const m=(1-sa/da)/2;v0=m;v1=1-m;}
   return new Float32Array([-1,-1,u0,v0,1, 1,-1,u1,v0,1, -1,1,u0,v1,1, 1,-1,u1,v0,1, 1,1,u1,v1,1, -1,1,u0,v1,1]);
+}
+function coverUVBounds(sw:number,sh:number,dw:number,dh:number):[number,number,number,number]{
+  const sa=sw/sh,da=dw/dh; let u0=0,u1=1,v0=0,v1=1;
+  if(sa>da){const m=(1-da/sa)/2;u0=m;u1=1-m;}
+  else if(sa<da){const m=(1-sa/da)/2;v0=m;v1=1-m;}
+  return [u0,u1,v0,v1];
 }
 
 // 32×32 subdivided mesh — ultra-smooth perspective warp, zero corner artefacts
@@ -240,6 +314,7 @@ function dl(blob:Blob,name:string){
 
 type Enhance={sharp:number;bright:number;contrast:number;sat:number;vignette:number;temp:number;grain:number;bloom:number};
 type GradeName='none'|'natural'|'cinematic'|'vivid';
+type TextItem={id:string;text:string;x:number;y:number;size:number;color:string;family:string;bold:boolean;italic:boolean;};
 const GRADES:Record<GradeName,Enhance>={
   none:      {sharp:0,    bright:0,     contrast:1.0,  sat:1.0,  vignette:0,    temp:0,     grain:0,    bloom:0   },
   natural:   {sharp:0.45, bright:0.018, contrast:1.06, sat:0.95, vignette:0.12, temp:0.05,  grain:0.08, bloom:0   },
@@ -593,6 +668,13 @@ export default function App(){
   const [toast,     setToast]    = useState<{msg:string;err?:boolean}|null>(null);
   const [zoom,      setZoom]     = useState(1.0);
   const [pan,       setPan]      = useState({x:0,y:0});
+  const [edgeBlend,  setEdgeBlend]  = useState(true);
+  const [mockupOp,   setMockupOp]   = useState(1.0);
+  const [lumaKey,    setLumaKey]    = useState(0.0);
+  const [lumaSoft,   setLumaSoft]   = useState(0.08);
+  const [chromaKey,  setChromaKey]  = useState(0.0);
+  const [textItems,  setTextItems]  = useState<TextItem[]>([]);
+  const [selTextId,  setSelTextId]  = useState<string|null>(null);
 
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const reflRef     = useRef<HTMLCanvasElement>(null);
@@ -604,6 +686,8 @@ export default function App(){
   const plainRef    = useRef<WebGLProgram|null>(null);
   const chromaRef   = useRef<WebGLProgram|null>(null);
   const postRef     = useRef<WebGLProgram|null>(null);
+  const cutoutRef   = useRef<WebGLProgram|null>(null);
+  const blendRef    = useRef<WebGLProgram|null>(null);
   const fboRef      = useRef<FBO|null>(null);
   const mTexRef     = useRef<WebGLTexture|null>(null);
   const rTexRef     = useRef<WebGLTexture|null>(null);
@@ -629,6 +713,15 @@ export default function App(){
   const recorderRef = useRef<MediaRecorder|null>(null);
   const chunksRef   = useRef<Blob[]>([]);
   const timerRef    = useRef<ReturnType<typeof setInterval>|null>(null);
+  const edgeBlendRef = useRef(true);
+  const mockupOpRef  = useRef(1.0);
+  const lumaKeyRef   = useRef(0.0);
+  const lumaSoftRef  = useRef(0.08);
+  const chromaKeyRef  = useRef(0.0);
+  const textItemsRef  = useRef<TextItem[]>([]);
+  const textDragRef   = useRef<{id:string;sx:number;sy:number;ox:number;oy:number}|null>(null);
+  const textCanvasRef = useRef<HTMLCanvasElement|null>(null);
+  const textTexRef    = useRef<WebGLTexture|null>(null);
 
   useEffect(()=>{pinsRef.current=pins},[pins]);
   useEffect(()=>{cszRef.current=csz},[csz]);
@@ -642,6 +735,12 @@ export default function App(){
   useEffect(()=>{trimOutRef.current=trimOut},[trimOut]);
   useEffect(()=>{zoomRef.current=zoom},[zoom]);
   useEffect(()=>{panRef.current=pan},[pan]);
+  useEffect(()=>{edgeBlendRef.current=edgeBlend},[edgeBlend]);
+  useEffect(()=>{mockupOpRef.current=mockupOp},[mockupOp]);
+  useEffect(()=>{lumaKeyRef.current=lumaKey},[lumaKey]);
+  useEffect(()=>{lumaSoftRef.current=lumaSoft},[lumaSoft]);
+  useEffect(()=>{chromaKeyRef.current=chromaKey},[chromaKey]);
+  useEffect(()=>{textItemsRef.current=textItems},[textItems]);
 
   // ── Init WebGL ──────────────────────────────────────────────────────────────
   useEffect(()=>{
@@ -650,14 +749,20 @@ export default function App(){
     const gl=canvas.getContext('webgl',{preserveDrawingBuffer:true,alpha:false,antialias:true});
     if(!gl) return;
     glRef.current=gl;
-    plainRef.current =mkProgram(gl,FRAG_PLAIN);
-    chromaRef.current=mkProgram(gl,FRAG_CHROMA);
-    postRef.current  =mkProgram(gl,FRAG_POST);
-    mTexRef.current  =mkTex(gl); rTexRef.current=mkTex(gl);
+    plainRef.current  =mkProgram(gl,FRAG_PLAIN);
+    chromaRef.current =mkProgram(gl,FRAG_CHROMA);
+    postRef.current   =mkProgram(gl,FRAG_POST);
+    cutoutRef.current =mkProgram(gl,FRAG_CUTOUT);
+    blendRef.current  =mkProgram(gl,FRAG_BLEND);
+    mTexRef.current  =mkTex(gl); rTexRef.current=mkTex(gl); textTexRef.current=mkTex(gl);
     fboRef.current   =createFBO(gl,canvas.width,canvas.height);
+    const tc=document.createElement('canvas'); tc.width=canvas.width; tc.height=canvas.height;
+    textCanvasRef.current=tc;
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
 
+    let frameCount=0;
     function frame(){
+      frameCount++;
       const gl=glRef.current!,plain=plainRef.current!,chroma=chromaRef.current!,
             post=postRef.current!,fbo=fboRef.current!,mt=mTexRef.current!,rt=rTexRef.current!;
       const mVid=mockupVidRef.current,rVid=recVidRef.current;
@@ -669,16 +774,38 @@ export default function App(){
       gl.viewport(0,0,W,H); gl.clearColor(0.02,0.02,0.055,1); gl.clear(gl.COLOR_BUFFER_BIT);
 
       if(modeRef.current==='manual'){
-        if(mReadyRef.current){
-          if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
-          drawQuad(gl,plain,mt,bgVerts(),{uEdge:0});
-        }
+        if(mReadyRef.current&&mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
+        if(rReadyRef.current&&!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
+        const mop=mockupOpRef.current, ue=edgeBlendRef.current?1:0;
+        const lk=lumaKeyRef.current, ls=lumaSoftRef.current, ck=chromaKeyRef.current;
+
         if(rReadyRef.current){
-          if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
           const sx=dW>0?W/dW:1,sy=dH>0?H/dH:1;
           const np=pinsRef.current.map(p=>({x:p.x*sx,y:p.y*sy})) as Quad;
-          const vt=pinVerts(np,W,H);
-          if(vt) drawQuad(gl,plain,rt,vt,{uEdge:0}); // sharp pixel-perfect edges
+          const pinUV={
+            uQ0:[np[0].x/W,1-np[0].y/H] as [number,number],
+            uQ1:[np[1].x/W,1-np[1].y/H] as [number,number],
+            uQ2:[np[2].x/W,1-np[2].y/H] as [number,number],
+            uQ3:[np[3].x/W,1-np[3].y/H] as [number,number],
+          };
+          if((lk>0.001||ck>0.001) && mReadyRef.current && blendRef.current){
+            // Single-pass blend: always opaque — no bleed possible
+            const crop=coverUVBounds(rW,rH,W,H);
+            drawQuad(gl,blendRef.current,mt,bgVerts(),
+              {...pinUV,uLuma:lk,uLumaSoft:ls,uChroma:ck,uRecCrop:crop},rt);
+          } else {
+            const vt=pinVerts(np,W,H);
+            if(vt){
+              drawQuad(gl,plain,rt,vt,{uEdge:ue});
+              if(mReadyRef.current){
+                drawQuad(gl,cutoutRef.current!,mt,bgVerts(),{...pinUV,uOpacity:mop});
+              }
+            } else if(mReadyRef.current){
+              drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
+            }
+          }
+        } else if(mReadyRef.current){
+          drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
         }
       } else {
         if(rReadyRef.current){
@@ -697,10 +824,37 @@ export default function App(){
         uSat:e.sat,uTemp:e.temp,uVig:e.vignette,uBloom:e.bloom,uGrain:e.grain,uTime:t,
       });
 
-      // Reflection via gl.readPixels — guaranteed to work with WebGL canvas
-      gl.finish(); // block until GPU is done writing pixels
+      // Text overlay — composite on top of post-processed canvas
+      const tc=textCanvasRef.current, ttex=textTexRef.current;
+      if(tc && ttex && textItemsRef.current.length>0){
+        if(tc.width!==W||tc.height!==H){tc.width=W;tc.height=H;}
+        const ctx2d=tc.getContext('2d');
+        if(ctx2d){
+          ctx2d.clearRect(0,0,W,H);
+          const dw=cszRef.current.w||1;
+          const scl=W/dw;
+          for(const item of textItemsRef.current){
+            ctx2d.save();
+            ctx2d.font=`${item.italic?'italic ':''}${item.bold?'bold ':''} ${Math.round(item.size*scl)}px ${item.family}`;
+            ctx2d.fillStyle=item.color;
+            ctx2d.shadowColor='rgba(0,0,0,0.55)'; ctx2d.shadowBlur=Math.round(4*scl);
+            ctx2d.fillText(item.text,item.x*W,item.y*H);
+            ctx2d.restore();
+          }
+          gl.bindTexture(gl.TEXTURE_2D,ttex);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+          gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,tc);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+          gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+          drawQuad(gl,plainRef.current!,ttex,bgVerts(),{uEdge:0,uOpacity:1});
+        }
+      }
+
+      // Reflection — throttled to every 4 frames, skipped during recording
+      const recording=recorderRef.current?.state==='recording';
       const refl = reflRef.current;
-      if (refl && mReadyRef.current) {
+      if (refl && mReadyRef.current && !recording && frameCount%4===0) {
+        gl.finish(); // block GPU only when needed for pixel readback
         const rfH = refl.height, rfW = Math.min(refl.width, W);
         const ctx = refl.getContext('2d');
         if (ctx) {
@@ -815,6 +969,19 @@ export default function App(){
     setMockupIsV(false); setMockupFile(name); setMockupSrc(url); setTab('edit');
   },[]);
 
+  const addText=useCallback(()=>{
+    const id=Date.now().toString();
+    setTextItems(p=>[...p,{id,text:'Your text',x:0.5,y:0.15,size:36,color:'#ffffff',family:'Inter, sans-serif',bold:false,italic:false}]);
+    setSelTextId(id);
+  },[]);
+  const updateText=useCallback((id:string,key:keyof TextItem,val:unknown)=>{
+    setTextItems(p=>p.map(it=>it.id===id?{...it,[key]:val}:it));
+  },[]);
+  const removeText=useCallback((id:string)=>{
+    setTextItems(p=>p.filter(it=>it.id!==id));
+    setSelTextId(null);
+  },[]);
+
   const onPinDown=useCallback((i:number)=>(e:React.PointerEvent)=>{
     e.preventDefault();e.stopPropagation(); // stop bubbling so canvas-wrap doesn't start pan
     activePinRef.current=i; setActivePin(i);
@@ -827,17 +994,23 @@ export default function App(){
   },[]);
   const onMove=useCallback((e:React.PointerEvent)=>{
     const ap=activePinRef.current;
+    const td=textDragRef.current;
     if(ap!==null){
-      // Use ref — no stale closure, no dropped frames between setActivePin and re-render
       const rect=canvasRef.current!.getBoundingClientRect();
       const z=zoomRef.current,{w,h}=cszRef.current;
       setPins(prev=>{const n=[...prev] as Quad;n[ap]={x:Math.max(0,Math.min(w,(e.clientX-rect.left)/z)),y:Math.max(0,Math.min(h,(e.clientY-rect.top)/z))};return n;});
+    } else if(td){
+      const rect=canvasRef.current!.getBoundingClientRect();
+      const z=zoomRef.current,{w,h}=cszRef.current;
+      const cx=(e.clientX-rect.left)/z, cy=(e.clientY-rect.top)/z;
+      setTextItems(prev=>prev.map(it=>it.id===td.id
+        ?{...it,x:Math.max(0,Math.min(1,td.ox+(cx-td.sx)/w)),y:Math.max(0,Math.min(1,td.oy+(cy-td.sy)/h))}:it));
     } else if(panStartRef.current){
       const {mx,my,px,py}=panStartRef.current;
       setPan({x:px+e.clientX-mx,y:py+e.clientY-my});
     }
   },[]);
-  const onUp=useCallback(()=>{activePinRef.current=null;setActivePin(null);panStartRef.current=null;},[]);
+  const onUp=useCallback(()=>{activePinRef.current=null;setActivePin(null);panStartRef.current=null;textDragRef.current=null;},[]);
   const onAreaWheel=useCallback((e:React.WheelEvent)=>{
     e.preventDefault();
     const factor=e.deltaY>0?0.88:1.14;
@@ -967,11 +1140,109 @@ export default function App(){
               {mode==='manual'&&mockupSrc&&(
                 <div className="sec">
                   <div className="sec-title">Corner Pins</div>
-                  <p style={{fontSize:10.5,color:'var(--muted)',lineHeight:1.7,marginBottom:9}}>
-                    Drag 4 handles onto the device screen. Edges are softly feathered — no hard cut lines.
+                  <p style={{fontSize:10.5,color:'var(--muted)',lineHeight:1.6,marginBottom:8}}>
+                    Drag 4 handles onto the device screen corners.
                   </p>
-                  <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:11}}
+                  <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:11,marginBottom:12}}
                     onClick={()=>setPins(defaultCorners(csz.w,csz.h))}>Reset pins</button>
+
+                  <div className="sec-title" style={{marginBottom:5}}>Edge Style</div>
+                  <div className="grade-row" style={{marginBottom:12}}>
+                    <button className={`grade-btn${!edgeBlend?' active':''}`} onClick={()=>setEdgeBlend(false)}>Sharp</button>
+                    <button className={`grade-btn${edgeBlend?' active':''}`}  onClick={()=>setEdgeBlend(true)}>Soft Blend</button>
+                  </div>
+
+                  <Slider label="Mockup Opacity" min={0.1} max={1} step={0.02} value={mockupOp} onChange={setMockupOp}/>
+                  {mockupOp<0.98&&(
+                    <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:10.5,marginTop:5}}
+                      onClick={()=>setMockupOp(1.0)}>Restore full opacity</button>
+                  )}
+
+                  <div className="sec-title" style={{marginTop:12,marginBottom:5}}>Hand in Front</div>
+                  <p style={{fontSize:10.5,color:'var(--muted)',lineHeight:1.6,marginBottom:8}}>
+                    Hand overlapping the screen? Pick your screen type, adjust pins to the screen corners, then raise the key value.
+                  </p>
+
+                  <div className="sec-title" style={{marginBottom:4,fontSize:9.5}}>SCREEN TYPE</div>
+                  <div className="grade-row" style={{marginBottom:10}}>
+                    <button className={`grade-btn${chromaKey<=0&&lumaKey<=0?' active':''}`}
+                      onClick={()=>{setLumaKey(0);setChromaKey(0);}}>Off</button>
+                    <button className={`grade-btn${lumaKey>0&&chromaKey<=0?' active':''}`}
+                      onClick={()=>{setLumaKey(0.08);setChromaKey(0);}}>Dark Screen</button>
+                    <button className={`grade-btn${chromaKey>0?' active':''}`}
+                      onClick={()=>{setChromaKey(0.12);setLumaKey(0);}}>Green Screen</button>
+                  </div>
+
+                  {lumaKey>0&&chromaKey<=0&&(
+                    <>
+                      <Slider label="Luma Threshold" min={0.01} max={0.5} step={0.01} value={lumaKey} onChange={setLumaKey}/>
+                      <Slider label="Softness" min={0.01} max={0.2} step={0.01} value={lumaSoft} onChange={setLumaSoft}/>
+                      <p style={{fontSize:10,color:'var(--muted)',lineHeight:1.5,marginTop:5}}>
+                        Start around 0.08. Raise until the screen area clears. Keep pins at the actual screen glass corners.
+                      </p>
+                    </>
+                  )}
+                  {chromaKey>0&&(
+                    <>
+                      <Slider label="Green Sensitivity" min={0.02} max={0.4} step={0.01} value={chromaKey} onChange={setChromaKey}/>
+                      <Slider label="Softness" min={0.01} max={0.2} step={0.01} value={lumaSoft} onChange={setLumaSoft}/>
+                      <p style={{fontSize:10,color:'var(--muted)',lineHeight:1.5,marginTop:5}}>
+                        Use a solid green on the laptop screen. Raise until the green area disappears cleanly.
+                      </p>
+                    </>
+                  )}
+
+                  {/* ── Text Overlay ── */}
+                  <div className="sec-title" style={{marginTop:16,marginBottom:6}}>Text Overlay</div>
+                  <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:11,marginBottom:8}}
+                    onClick={addText}>+ Add Text</button>
+                  {textItems.map(item=>(
+                    <div key={item.id} style={{marginBottom:4,padding:'6px 8px',borderRadius:6,
+                      background:selTextId===item.id?'var(--surface)':'transparent',
+                      border:`1px solid ${selTextId===item.id?'var(--accent)':'var(--border)'}`,cursor:'pointer'}}
+                      onClick={()=>setSelTextId(selTextId===item.id?null:item.id)}>
+                      <div style={{fontSize:11,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                        {item.text||'(empty)'}
+                      </div>
+                      {selTextId===item.id&&(
+                        <div onClick={e=>e.stopPropagation()} style={{marginTop:6}}>
+                          <input value={item.text} placeholder="Enter text…"
+                            onChange={e=>updateText(item.id,'text',e.target.value)}
+                            style={{width:'100%',marginBottom:6,fontSize:12,padding:'4px 6px',boxSizing:'border-box',
+                              background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',borderRadius:4}}/>
+                          <div style={{display:'flex',gap:5,alignItems:'center',marginBottom:6}}>
+                            <input type="number" value={item.size} min={8} max={400}
+                              onChange={e=>updateText(item.id,'size',Math.max(8,+e.target.value))}
+                              style={{width:56,fontSize:11,padding:'3px 4px',
+                                background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',borderRadius:4}}/>
+                            <span style={{fontSize:9,color:'var(--muted)'}}>px</span>
+                            <input type="color" value={item.color}
+                              onChange={e=>updateText(item.id,'color',e.target.value)}
+                              style={{width:26,height:22,border:'none',background:'none',cursor:'pointer',padding:0}}/>
+                            <button className={`grade-btn${item.bold?' active':''}`}
+                              onClick={()=>updateText(item.id,'bold',!item.bold)}
+                              style={{padding:'2px 8px',fontWeight:'bold',fontSize:12,minWidth:28}}>B</button>
+                            <button className={`grade-btn${item.italic?' active':''}`}
+                              onClick={()=>updateText(item.id,'italic',!item.italic)}
+                              style={{padding:'2px 8px',fontStyle:'italic',fontSize:12,minWidth:28}}>I</button>
+                          </div>
+                          <select value={item.family} onChange={e=>updateText(item.id,'family',e.target.value)}
+                            style={{width:'100%',marginBottom:6,fontSize:11,padding:'3px 6px',
+                              background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',borderRadius:4}}>
+                            <option value="Inter, sans-serif">Inter</option>
+                            <option value="'Arial Black', sans-serif">Arial Black</option>
+                            <option value="Georgia, serif">Georgia</option>
+                            <option value="'Playfair Display', Georgia, serif">Playfair Display</option>
+                            <option value="'Courier New', monospace">Courier New</option>
+                            <option value="system-ui, sans-serif">System UI</option>
+                          </select>
+                          <button className="btn btn-ghost"
+                            style={{width:'100%',justifyContent:'center',fontSize:10.5,color:'#e05050'}}
+                            onClick={()=>removeText(item.id)}>Remove</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -1122,6 +1393,27 @@ export default function App(){
                   </div>
                 );
               })}
+              {mockupSrc&&textItems.map(item=>(
+                <div key={item.id}
+                  style={{position:'absolute',left:item.x*csz.w,top:item.y*csz.h,
+                    transform:'translateY(-0.85em)',
+                    fontSize:item.size,fontFamily:item.family,
+                    fontWeight:item.bold?'bold':'normal',fontStyle:item.italic?'italic':'normal',
+                    color:item.color,cursor:'move',userSelect:'none',pointerEvents:'all',
+                    outline:selTextId===item.id?'1px dashed var(--accent)':'1px dashed transparent',
+                    padding:'2px 4px',whiteSpace:'nowrap',
+                    textShadow:'0 2px 8px rgba(0,0,0,0.6)',lineHeight:1}}
+                  onPointerDown={e=>{
+                    e.stopPropagation();
+                    setSelTextId(item.id);
+                    const rect=canvasRef.current!.getBoundingClientRect();
+                    const z=zoomRef.current;
+                    textDragRef.current={id:item.id,sx:(e.clientX-rect.left)/z,sy:(e.clientY-rect.top)/z,ox:item.x,oy:item.y};
+                    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+                  }}>
+                  {item.text||'✦ Text'}
+                </div>
+              ))}
               {!mockupSrc&&(
                 <div className="empty" style={{width:csz.w,height:csz.h}}>
                   <div className="empty-ico">🖼️</div>
