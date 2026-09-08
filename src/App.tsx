@@ -728,6 +728,7 @@ export default function App(){
   const audioElRef    = useRef<HTMLAudioElement|null>(null);
   const audioCtxRef   = useRef<AudioContext|null>(null);
   const audioVolRef   = useRef(0.8);
+  const videoTrackRef = useRef<{requestFrame():void}|null>(null);
 
   useEffect(()=>{pinsRef.current=pins},[pins]);
   useEffect(()=>{cszRef.current=csz},[csz]);
@@ -843,12 +844,28 @@ export default function App(){
           ctx2d.textBaseline='top';
           for(const item of textItemsRef.current){
             ctx2d.save();
-            // Strip trailing generic keyword so emoji fonts aren't blocked by early match
+            const sz=Math.round(item.size*scl);
             const base=item.family.replace(/,?\s*(sans-serif|serif|cursive|monospace)\s*$/,'');
-            ctx2d.font=`${item.italic?'italic ':''}${item.bold?'bold ':''} ${Math.round(item.size*scl)}px ${base},'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
+            const mainFont=`${item.italic?'italic ':''}${item.bold?'bold ':''} ${sz}px ${base},'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
+            const emojiFont=`${sz}px 'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
             ctx2d.fillStyle=item.color;
             ctx2d.shadowColor='rgba(0,0,0,0.6)'; ctx2d.shadowBlur=Math.round(6*scl);
-            ctx2d.fillText(item.text,item.x*W,item.y*H);
+            // Draw segment-by-segment so emoji always use the emoji font
+            const emojiRe=/\p{Extended_Pictographic}/gu;
+            const txt=item.text; let last=0, cx=item.x*W;
+            for(const m of txt.matchAll(emojiRe)){
+              if(m.index!>last){
+                ctx2d.font=mainFont;
+                const seg=txt.slice(last,m.index);
+                ctx2d.fillText(seg,cx,item.y*H);
+                cx+=ctx2d.measureText(seg).width;
+              }
+              ctx2d.font=emojiFont;
+              ctx2d.fillText(m[0],cx,item.y*H);
+              cx+=ctx2d.measureText(m[0]).width;
+              last=m.index!+m[0].length;
+            }
+            if(last<txt.length){ctx2d.font=mainFont;ctx2d.fillText(txt.slice(last),cx,item.y*H);}
             ctx2d.restore();
           }
           gl.bindTexture(gl.TEXTURE_2D,ttex);
@@ -895,6 +912,9 @@ export default function App(){
           ctx.putImageData(imgData, shift, 0);
         }
       }
+
+      // Push rendered frame into capture stream exactly once per rAF tick
+      if(recorderRef.current?.state==='recording') videoTrackRef.current?.requestFrame();
 
       rafRef.current=requestAnimationFrame(frame);
     }
@@ -1060,10 +1080,14 @@ export default function App(){
     const c=canvasRef.current; if(!c) return;
     const rVid=recVidRef.current;
     if(rVid&&rVid.duration) rVid.currentTime=rVid.duration*trimInRef.current;
-    const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
-    const bitrate=quality==='ultra'?60_000_000:30_000_000;
+    const mime=MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')?'video/mp4;codecs=avc1'
+             :MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
+    const ext=mime.startsWith('video/mp4')?'mp4':'webm';
+    const bitrate=quality==='ultra'?80_000_000:40_000_000;
+    // captureStream(0) + requestFrame() gives frame-perfect sync — no dropped/duplicate frames
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const canvasStream=(c as any).captureStream(60) as MediaStream;
+    const canvasStream=(c as any).captureStream(0) as MediaStream;
+    videoTrackRef.current=(canvasStream.getVideoTracks()[0] as unknown as {requestFrame():void});
     let recStream=canvasStream;
     const audioEl=audioElRef.current;
     if(audioEl&&audioEl.src){
@@ -1080,7 +1104,7 @@ export default function App(){
     chunksRef.current=[];
     rec.ondataavailable=e=>{if(e.data.size>0)chunksRef.current.push(e.data);};
     rec.onstop=()=>{
-      dl(new Blob(chunksRef.current,{type:mime}),'mockup.webm');
+      dl(new Blob(chunksRef.current,{type:mime}),`mockup.${ext}`);
       setIsRec(false);setRecTime(0);if(timerRef.current)clearInterval(timerRef.current);
       showToast('Recording saved!');
     };
