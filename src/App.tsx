@@ -675,6 +675,9 @@ export default function App(){
   const [chromaKey,  setChromaKey]  = useState(0.0);
   const [textItems,  setTextItems]  = useState<TextItem[]>([]);
   const [selTextId,  setSelTextId]  = useState<string|null>(null);
+  const [audioSrc,   setAudioSrc]   = useState<string|null>(null);
+  const [audioName,  setAudioName]  = useState('');
+  const [audioVol,   setAudioVol]   = useState(0.8);
 
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const reflRef     = useRef<HTMLCanvasElement>(null);
@@ -722,6 +725,9 @@ export default function App(){
   const textDragRef   = useRef<{id:string;sx:number;sy:number;ox:number;oy:number}|null>(null);
   const textCanvasRef = useRef<HTMLCanvasElement|null>(null);
   const textTexRef    = useRef<WebGLTexture|null>(null);
+  const audioElRef    = useRef<HTMLAudioElement|null>(null);
+  const audioCtxRef   = useRef<AudioContext|null>(null);
+  const audioVolRef   = useRef(0.8);
 
   useEffect(()=>{pinsRef.current=pins},[pins]);
   useEffect(()=>{cszRef.current=csz},[csz]);
@@ -741,6 +747,7 @@ export default function App(){
   useEffect(()=>{lumaSoftRef.current=lumaSoft},[lumaSoft]);
   useEffect(()=>{chromaKeyRef.current=chromaKey},[chromaKey]);
   useEffect(()=>{textItemsRef.current=textItems},[textItems]);
+  useEffect(()=>{audioVolRef.current=audioVol; if(audioElRef.current) audioElRef.current.volume=audioVol;},[audioVol]);
 
   // ── Init WebGL ──────────────────────────────────────────────────────────────
   useEffect(()=>{
@@ -833,11 +840,14 @@ export default function App(){
           ctx2d.clearRect(0,0,W,H);
           const dw=cszRef.current.w||1;
           const scl=W/dw;
+          ctx2d.textBaseline='top';
           for(const item of textItemsRef.current){
             ctx2d.save();
-            ctx2d.font=`${item.italic?'italic ':''}${item.bold?'bold ':''} ${Math.round(item.size*scl)}px ${item.family},'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
+            // Strip trailing generic keyword so emoji fonts aren't blocked by early match
+            const base=item.family.replace(/,?\s*(sans-serif|serif|cursive|monospace)\s*$/,'');
+            ctx2d.font=`${item.italic?'italic ':''}${item.bold?'bold ':''} ${Math.round(item.size*scl)}px ${base},'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
             ctx2d.fillStyle=item.color;
-            ctx2d.shadowColor='rgba(0,0,0,0.55)'; ctx2d.shadowBlur=Math.round(4*scl);
+            ctx2d.shadowColor='rgba(0,0,0,0.6)'; ctx2d.shadowBlur=Math.round(6*scl);
             ctx2d.fillText(item.text,item.x*W,item.y*H);
             ctx2d.restore();
           }
@@ -1053,7 +1063,20 @@ export default function App(){
     const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
     const bitrate=quality==='ultra'?60_000_000:30_000_000;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rec=new MediaRecorder((c as any).captureStream(60),{mimeType:mime,videoBitsPerSecond:bitrate});
+    const canvasStream=(c as any).captureStream(60) as MediaStream;
+    let recStream=canvasStream;
+    const audioEl=audioElRef.current;
+    if(audioEl&&audioEl.src){
+      try{
+        const actx=new AudioContext(); audioCtxRef.current=actx;
+        const src=actx.createMediaElementSource(audioEl);
+        const dest=actx.createMediaStreamDestination();
+        src.connect(dest); src.connect(actx.destination);
+        audioEl.volume=audioVolRef.current; audioEl.currentTime=0; audioEl.loop=true; audioEl.play();
+        recStream=new MediaStream([...canvasStream.getVideoTracks(),...dest.stream.getAudioTracks()]);
+      }catch(e){console.warn('Audio mix failed',e);}
+    }
+    const rec=new MediaRecorder(recStream,{mimeType:mime,videoBitsPerSecond:bitrate});
     chunksRef.current=[];
     rec.ondataavailable=e=>{if(e.data.size>0)chunksRef.current.push(e.data);};
     rec.onstop=()=>{
@@ -1067,6 +1090,8 @@ export default function App(){
 
   const stopRec=useCallback(()=>{
     recorderRef.current?.stop(); if(timerRef.current)clearInterval(timerRef.current);
+    const ae=audioElRef.current; if(ae){ae.pause();ae.currentTime=0;}
+    audioCtxRef.current?.close(); audioCtxRef.current=null;
   },[]);
 
   function showToast(msg:string,err=false){setToast({msg,err});setTimeout(()=>setToast(null),3000);}
@@ -1190,6 +1215,47 @@ export default function App(){
                         Use a solid green on the laptop screen. Raise until the green area disappears cleanly.
                       </p>
                     </>
+                  )}
+
+                  {/* ── Audio Track ── */}
+                  <div className="sec-title" style={{marginTop:16,marginBottom:6}}>Audio Track</div>
+                  <label style={{display:'block',cursor:'pointer',marginBottom:6}}>
+                    <div className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:11}}
+                      onClick={()=>document.getElementById('audio-pick')?.click()}>
+                      {audioName ? `🎵 ${audioName.slice(0,22)}${audioName.length>22?'…':''}` : '+ Add Music / Audio'}
+                    </div>
+                    <input id="audio-pick" type="file" accept="audio/*" style={{display:'none'}}
+                      onChange={e=>{
+                        const f=e.target.files?.[0]; if(!f) return;
+                        const url=URL.createObjectURL(f);
+                        if(!audioElRef.current){audioElRef.current=new Audio();}
+                        audioElRef.current.src=url; audioElRef.current.volume=audioVolRef.current;
+                        setAudioSrc(url); setAudioName(f.name);
+                      }}/>
+                  </label>
+                  {audioSrc&&(
+                    <div style={{marginBottom:8}}>
+                      <div className="sl-lbl" style={{marginBottom:3}}>
+                        <span>Volume</span><span>{Math.round(audioVol*100)}%</span>
+                      </div>
+                      <input type="range" min={0} max={1} step={0.01} value={audioVol}
+                        onChange={e=>setAudioVol(+e.target.value)} style={{width:'100%'}}/>
+                      <div style={{display:'flex',gap:5,marginTop:5}}>
+                        <button className="btn btn-ghost" style={{flex:1,fontSize:10,justifyContent:'center'}}
+                          onClick={()=>{const ae=audioElRef.current;if(ae){ae.currentTime=0;ae.play();}}}>▶ Preview</button>
+                        <button className="btn btn-ghost" style={{flex:1,fontSize:10,justifyContent:'center'}}
+                          onClick={()=>{audioElRef.current?.pause();}}>⏹ Stop</button>
+                        <button className="btn btn-ghost" style={{flex:1,fontSize:10,justifyContent:'center',color:'#e05050'}}
+                          onClick={()=>{
+                            audioElRef.current?.pause();
+                            if(audioElRef.current) audioElRef.current.src='';
+                            setAudioSrc(null); setAudioName('');
+                          }}>✕</button>
+                      </div>
+                      <p style={{fontSize:9,color:'var(--muted)',marginTop:4,lineHeight:1.5}}>
+                        Audio will be mixed into your recording. Loops automatically.
+                      </p>
+                    </div>
                   )}
 
                   {/* ── Text Overlay ── */}
