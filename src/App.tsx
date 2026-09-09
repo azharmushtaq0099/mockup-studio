@@ -21,7 +21,7 @@ void main() {
   vec2 uv = vUVW.xy / vUVW.z;
   vec4 c = texture2D(uTex, uv);
   if (uEdge > 0.5) {
-    float f = 0.022;
+    float f = 0.05;
     float a = smoothstep(0.0, f, uv.x)   * smoothstep(0.0, f, 1.0-uv.x) *
               smoothstep(0.0, f, uv.y)   * smoothstep(0.0, f, 1.0-uv.y);
     c.a *= a;
@@ -809,10 +809,11 @@ export default function App(){
           } else {
             const vt=pinVerts(np,W,H);
             if(vt){
-              drawQuad(gl,plain,rt,vt,{uEdge:ue});
+              // Mockup first (full), then recording on top with soft feather — seamless embed
               if(mReadyRef.current){
-                drawQuad(gl,cutoutRef.current!,mt,bgVerts(),{...pinUV,uOpacity:mop});
+                drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
               }
+              drawQuad(gl,plain,rt,vt,{uEdge:ue});
             } else if(mReadyRef.current){
               drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
             }
@@ -851,26 +852,30 @@ export default function App(){
             ctx2d.save();
             const sz=Math.round(item.size*scl);
             const base=item.family.replace(/,?\s*(sans-serif|serif|cursive|monospace)\s*$/,'');
-            const mainFont=`${item.italic?'italic ':''}${item.bold?'bold ':''} ${sz}px ${base},'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
+            const mainFont=`${item.italic?'italic ':''}${item.bold?'bold ':''}${sz}px ${base},'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
             const emojiFont=`${sz}px 'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif`;
             ctx2d.fillStyle=item.color;
             ctx2d.shadowColor='rgba(0,0,0,0.6)'; ctx2d.shadowBlur=Math.round(6*scl);
-            // Draw segment-by-segment so emoji always use the emoji font
-            const emojiRe=/\p{Extended_Pictographic}/gu;
-            const txt=item.text; let last=0, cx=item.x*W;
-            for(const m of txt.matchAll(emojiRe)){
-              if(m.index!>last){
-                ctx2d.font=mainFont;
-                const seg=txt.slice(last,m.index);
-                ctx2d.fillText(seg,cx,item.y*H);
-                cx+=ctx2d.measureText(seg).width;
+            const lines=item.text.split('\n');
+            const lineH=sz*1.25;
+            lines.forEach((txt,li)=>{
+              const emojiRe=/\p{Extended_Pictographic}/gu;
+              let last=0, cx=item.x*W;
+              const cy=item.y*H+li*lineH;
+              for(const m of txt.matchAll(emojiRe)){
+                if(m.index!>last){
+                  ctx2d.font=mainFont;
+                  const seg=txt.slice(last,m.index);
+                  ctx2d.fillText(seg,cx,cy);
+                  cx+=ctx2d.measureText(seg).width;
+                }
+                ctx2d.font=emojiFont;
+                ctx2d.fillText(m[0],cx,cy);
+                cx+=ctx2d.measureText(m[0]).width;
+                last=m.index!+m[0].length;
               }
-              ctx2d.font=emojiFont;
-              ctx2d.fillText(m[0],cx,item.y*H);
-              cx+=ctx2d.measureText(m[0]).width;
-              last=m.index!+m[0].length;
-            }
-            if(last<txt.length){ctx2d.font=mainFont;ctx2d.fillText(txt.slice(last),cx,item.y*H);}
+              if(last<txt.length){ctx2d.font=mainFont;ctx2d.fillText(txt.slice(last),cx,cy);}
+            });
             ctx2d.restore();
           }
           gl.bindTexture(gl.TEXTURE_2D,ttex);
@@ -940,9 +945,6 @@ export default function App(){
           octx.drawImage(glc,Math.round((dw-mw)/2),Math.round((dh-mh)/2),mw,mh);
         }
       }
-
-      // Push rendered frame into capture stream exactly once per rAF tick
-      if(recorderRef.current?.state==='recording') videoTrackRef.current?.requestFrame();
 
       rafRef.current=requestAnimationFrame(frame);
     }
@@ -1116,10 +1118,8 @@ export default function App(){
     const ratio=exportRatioRef.current;
     let recordCanvas:HTMLCanvasElement=c;
     if(ratio!=='16:9'&&outCanvasRef.current) recordCanvas=outCanvasRef.current;
-    // captureStream(0) + requestFrame() gives frame-perfect sync — no dropped/duplicate frames
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const canvasStream=(recordCanvas as any).captureStream(0) as MediaStream;
-    videoTrackRef.current=(canvasStream.getVideoTracks()[0] as unknown as {requestFrame():void});
+    const canvasStream=(recordCanvas as any).captureStream(60) as MediaStream;
     let recStream=canvasStream;
     const audioEl=audioElRef.current;
     if(audioEl&&audioEl.src){
@@ -1140,7 +1140,7 @@ export default function App(){
       setIsRec(false);setRecTime(0);if(timerRef.current)clearInterval(timerRef.current);
       showToast('Recording saved!');
     };
-    recorderRef.current=rec; rec.start(100); setIsRec(true); setRecTime(0); setShowExp(false);
+    recorderRef.current=rec; rec.start(500); setIsRec(true); setRecTime(0); setShowExp(false);
     timerRef.current=setInterval(()=>setRecTime(t=>t+1),1000);
   },[quality]);
 
@@ -1328,10 +1328,27 @@ export default function App(){
                       </div>
                       {selTextId===item.id&&(
                         <div onClick={e=>e.stopPropagation()} style={{marginTop:6}}>
-                          <input value={item.text} placeholder="Enter text…"
+                          <textarea value={item.text} placeholder="Enter text… (Enter = new line)"
+                            rows={3}
                             onChange={e=>updateText(item.id,'text',e.target.value)}
-                            style={{width:'100%',marginBottom:6,fontSize:12,padding:'4px 6px',boxSizing:'border-box',
-                              background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',borderRadius:4}}/>
+                            style={{width:'100%',marginBottom:5,fontSize:12,padding:'4px 6px',boxSizing:'border-box',
+                              background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',borderRadius:4,
+                              resize:'none',fontFamily:'inherit',lineHeight:1.5}}/>
+                          <div style={{marginBottom:7}}>
+                            <div style={{fontSize:9,fontWeight:700,letterSpacing:'.8px',textTransform:'uppercase',color:'var(--muted)',marginBottom:4}}>Emojis — click to insert</div>
+                            <div style={{display:'flex',flexWrap:'wrap',gap:2,background:'var(--bg)',border:'1px solid var(--border)',borderRadius:5,padding:'5px'}}>
+                              {['😀','😂','😍','😎','🥰','😭','🤩','😤','🥳','🔥','✨','💯','👏','🙌','👍','❤️','💕','🎉','🚀','⭐','💪','🏆','💎','⚡','🎯','💡','📱','💻','🎬','🎵'].map(em=>(
+                                <span key={em}
+                                  onClick={()=>updateText(item.id,'text',item.text+em)}
+                                  style={{fontSize:17,cursor:'pointer',padding:'2px 3px',borderRadius:4,lineHeight:1,
+                                    transition:'transform .1s'}}
+                                  onMouseEnter={e=>(e.currentTarget as HTMLElement).style.transform='scale(1.3)'}
+                                  onMouseLeave={e=>(e.currentTarget as HTMLElement).style.transform='scale(1)'}>
+                                  {em}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
                           <div style={{display:'flex',gap:5,alignItems:'center',marginBottom:6}}>
                             <input type="number" value={item.size} min={8} max={400}
                               onChange={e=>updateText(item.id,'size',Math.max(8,+e.target.value))}
@@ -1537,13 +1554,12 @@ export default function App(){
               {mockupSrc&&textItems.map(item=>(
                 <div key={item.id}
                   style={{position:'absolute',left:item.x*csz.w,top:item.y*csz.h,
-                    transform:'translateY(-0.85em)',
                     fontSize:item.size,fontFamily:item.family,
                     fontWeight:item.bold?'bold':'normal',fontStyle:item.italic?'italic':'normal',
                     color:item.color,cursor:'move',userSelect:'none',pointerEvents:'all',
                     outline:selTextId===item.id?'1px dashed var(--accent)':'1px dashed transparent',
-                    padding:'2px 4px',whiteSpace:'nowrap',
-                    textShadow:'0 2px 8px rgba(0,0,0,0.6)',lineHeight:1}}
+                    padding:'2px 4px',whiteSpace:'pre',
+                    textShadow:'0 2px 8px rgba(0,0,0,0.6)',lineHeight:1.25}}
                   onPointerDown={e=>{
                     e.stopPropagation();
                     setSelTextId(item.id);
