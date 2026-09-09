@@ -838,9 +838,11 @@ export default function App(){
         uSat:e.sat,uTemp:e.temp,uVig:e.vignette,uBloom:e.bloom,uGrain:e.grain,uTime:t,
       });
 
-      // Text overlay — composite on top of post-processed canvas
+      // Text overlay + bezel border — composite on top of post-processed canvas
       const tc=textCanvasRef.current, ttex=textTexRef.current;
-      if(tc && ttex && textItemsRef.current.length>0){
+      const hasTextItems=textItemsRef.current.length>0;
+      const hasRecForBorder=rReadyRef.current&&modeRef.current==='manual';
+      if(tc && ttex && (hasTextItems||hasRecForBorder)){
         if(tc.width!==W||tc.height!==H){tc.width=W;tc.height=H;}
         const ctx2d=tc.getContext('2d');
         if(ctx2d){
@@ -848,7 +850,7 @@ export default function App(){
           const dw=cszRef.current.w||1;
           const scl=W/dw;
           ctx2d.textBaseline='top';
-          for(const item of textItemsRef.current){
+          if(hasTextItems) for(const item of textItemsRef.current){
             ctx2d.save();
             const sz=Math.round(item.size*scl);
             const base=item.family.replace(/,?\s*(sans-serif|serif|cursive|monospace)\s*$/,'');
@@ -878,6 +880,25 @@ export default function App(){
             });
             ctx2d.restore();
           }
+          // Thin bezel border — left, bottom, right only (top excluded per user preference)
+          if(hasRecForBorder){
+            const {w:dW2,h:dH2}=cszRef.current;
+            const sx2=dW2>0?W/dW2:1,sy2=dH2>0?H/dH2:1;
+            const np2=pinsRef.current.map(p=>({x:p.x*sx2,y:p.y*sy2}));
+            // np2[0]=TL, np2[1]=TR, np2[2]=BR, np2[3]=BL
+            ctx2d.save();
+            ctx2d.strokeStyle='rgba(0,0,0,0.92)';
+            ctx2d.lineWidth=Math.max(2,Math.round(2*scl));
+            ctx2d.lineJoin='round';
+            ctx2d.beginPath();
+            ctx2d.moveTo(np2[0].x,np2[0].y); // start at TL
+            ctx2d.lineTo(np2[3].x,np2[3].y); // left edge → BL
+            ctx2d.lineTo(np2[2].x,np2[2].y); // bottom edge → BR
+            ctx2d.lineTo(np2[1].x,np2[1].y); // right edge → TR
+            ctx2d.stroke();
+            ctx2d.restore();
+          }
+
           gl.bindTexture(gl.TEXTURE_2D,ttex);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
           gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,tc);
