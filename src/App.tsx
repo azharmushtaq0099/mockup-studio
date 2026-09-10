@@ -733,6 +733,12 @@ export default function App(){
   const videoTrackRef  = useRef<{requestFrame():void}|null>(null);
   const outCanvasRef   = useRef<HTMLCanvasElement|null>(null);
   const exportRatioRef = useRef<ExportRatio>('16:9');
+  const videoEncoderRef = useRef<any>(null);
+  const muxerRef        = useRef<any>(null);
+  const muxerTargetRef  = useRef<any>(null);
+  const recStartTimeRef = useRef(0);
+  const recFrameRef     = useRef(0);
+  const useWebCodecsRef = useRef(false);
 
   useEffect(()=>{pinsRef.current=pins},[pins]);
   useEffect(()=>{cszRef.current=csz},[csz]);
@@ -967,6 +973,20 @@ export default function App(){
         }
       }
 
+      // WebCodecs: feed VideoFrame to hardware H.264 encoder each rAF tick
+      if(videoEncoderRef.current&&(videoEncoderRef.current.encodeQueueSize??0)<10){
+        try{
+          const VF=(window as any).VideoFrame;
+          const srcCvs=(exportRatioRef.current!=='16:9'&&outCanvasRef.current)?outCanvasRef.current:canvas;
+          const ts=Math.round((performance.now()-recStartTimeRef.current)*1000);
+          const vf=new VF(srcCvs,{timestamp:ts});
+          videoEncoderRef.current.encode(vf,{keyFrame:recFrameRef.current%120===0});
+          vf.close(); recFrameRef.current++;
+        }catch{}
+      } else if(recorderRef.current?.state==='recording'){
+        videoTrackRef.current?.requestFrame();
+      }
+
       rafRef.current=requestAnimationFrame(frame);
     }
     rafRef.current=requestAnimationFrame(frame);
@@ -1131,42 +1151,83 @@ export default function App(){
     const c=canvasRef.current; if(!c) return;
     const rVid=recVidRef.current;
     if(rVid&&rVid.duration) rVid.currentTime=rVid.duration*trimInRef.current;
-    const mime=MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')?'video/mp4;codecs=avc1'
-             :MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
-    const ext=mime.startsWith('video/mp4')?'mp4':'webm';
-    const bitrate=quality==='ultra'?80_000_000:40_000_000;
-    // Use output canvas for ratio conversion (9:16 / 1:1), native canvas for 16:9
     const ratio=exportRatioRef.current;
-    let recordCanvas:HTMLCanvasElement=c;
-    if(ratio!=='16:9'&&outCanvasRef.current) recordCanvas=outCanvasRef.current;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const canvasStream=(recordCanvas as any).captureStream(60) as MediaStream;
-    let recStream=canvasStream;
-    const audioEl=audioElRef.current;
-    if(audioEl&&audioEl.src){
-      try{
-        const actx=new AudioContext(); audioCtxRef.current=actx;
-        const src=actx.createMediaElementSource(audioEl);
-        const dest=actx.createMediaStreamDestination();
-        src.connect(dest); src.connect(actx.destination);
-        audioEl.volume=audioVolRef.current; audioEl.currentTime=0; audioEl.loop=true; audioEl.play();
-        recStream=new MediaStream([...canvasStream.getVideoTracks(),...dest.stream.getAudioTracks()]);
-      }catch(e){console.warn('Audio mix failed',e);}
+    let recCvs:HTMLCanvasElement=c, rW=c.width, rH=c.height;
+    if(ratio!=='16:9'){
+      if(!outCanvasRef.current) outCanvasRef.current=document.createElement('canvas');
+      rW=1080; rH=ratio==='9:16'?1920:1080;
+      outCanvasRef.current.width=rW; outCanvasRef.current.height=rH;
+      recCvs=outCanvasRef.current;
     }
-    const rec=new MediaRecorder(recStream,{mimeType:mime,videoBitsPerSecond:bitrate});
-    chunksRef.current=[];
-    rec.ondataavailable=e=>{if(e.data.size>0)chunksRef.current.push(e.data);};
-    rec.onstop=()=>{
-      dl(new Blob(chunksRef.current,{type:mime}),`mockup.${ext}`);
-      setIsRec(false);setRecTime(0);if(timerRef.current)clearInterval(timerRef.current);
-      showToast('Recording saved!');
+
+    // MediaRecorder fallback (Firefox / Safari / older Chrome)
+    const doMR=()=>{
+      const mime=MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')?'video/mp4;codecs=avc1'
+               :MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
+      const ext=mime.startsWith('video/mp4')?'mp4':'webm';
+      const cs=(recCvs as any).captureStream(60) as MediaStream;
+      let rs=cs;
+      const ae=audioElRef.current;
+      if(ae&&ae.src){try{
+        const a=new AudioContext();audioCtxRef.current=a;
+        const s=a.createMediaElementSource(ae),d=a.createMediaStreamDestination();
+        s.connect(d);s.connect(a.destination);
+        ae.volume=audioVolRef.current;ae.currentTime=0;ae.loop=true;ae.play();
+        rs=new MediaStream([...cs.getVideoTracks(),...d.stream.getAudioTracks()]);}catch{}}
+      const rec=new MediaRecorder(rs,{mimeType:mime,videoBitsPerSecond:quality==='ultra'?80_000_000:40_000_000});
+      chunksRef.current=[];
+      rec.ondataavailable=e=>{if(e.data.size>0)chunksRef.current.push(e.data);};
+      rec.onstop=()=>{dl(new Blob(chunksRef.current,{type:mime}),`mockup.${ext}`);
+        setIsRec(false);setRecTime(0);if(timerRef.current)clearInterval(timerRef.current);showToast('Saved!');};
+      recorderRef.current=rec; rec.start(500); setIsRec(true); setRecTime(0); setShowExp(false);
+      timerRef.current=setInterval(()=>setRecTime(t=>t+1),1000);
     };
-    recorderRef.current=rec; rec.start(500); setIsRec(true); setRecTime(0); setShowExp(false);
-    timerRef.current=setInterval(()=>setRecTime(t=>t+1),1000);
+
+    // WebCodecs — hardware H.264 encoder, genuine premium quality (Chrome 94+)
+    const wcOK=typeof (window as any).VideoEncoder!=='undefined'&&typeof (window as any).VideoFrame!=='undefined';
+    useWebCodecsRef.current=wcOK;
+    if(!wcOK){ doMR(); return; }
+
+    import('mp4-muxer').then(({Muxer,ArrayBufferTarget}:any)=>{
+      const tgt=new ArrayBufferTarget();
+      const mux=new Muxer({target:tgt,video:{codec:'avc',width:rW,height:rH},fastStart:'in-memory'});
+      const enc=new (window as any).VideoEncoder({
+        output:(ch:any,mt:any)=>mux.addVideoChunk(ch,mt),
+        error:(e:Error)=>console.error('VideoEncoder:',e),
+      });
+      enc.configure({
+        codec:'avc1.640028',         // H.264 High Profile — GPU hardware encoder
+        width:rW, height:rH,
+        bitrate:quality==='ultra'?15_000_000:10_000_000,
+        framerate:60,
+        hardwareAcceleration:'prefer-hardware',
+        latencyMode:'quality',
+      });
+      videoEncoderRef.current=enc; muxerRef.current=mux; muxerTargetRef.current=tgt;
+      recStartTimeRef.current=performance.now(); recFrameRef.current=0;
+      setIsRec(true); setRecTime(0); setShowExp(false);
+      timerRef.current=setInterval(()=>setRecTime(t=>t+1),1000);
+      const ae=audioElRef.current;
+      if(ae&&ae.src){try{const a=new AudioContext();audioCtxRef.current=a;
+        const s=a.createMediaElementSource(ae);s.connect(a.destination);
+        ae.volume=audioVolRef.current;ae.currentTime=0;ae.loop=true;ae.play();}catch{}}
+    }).catch(()=>{ useWebCodecsRef.current=false; doMR(); });
   },[quality]);
 
   const stopRec=useCallback(()=>{
-    recorderRef.current?.stop(); if(timerRef.current)clearInterval(timerRef.current);
+    if(useWebCodecsRef.current&&videoEncoderRef.current){
+      const enc=videoEncoderRef.current, mux=muxerRef.current, tgt=muxerTargetRef.current;
+      videoEncoderRef.current=null;
+      setIsRec(false); setRecTime(0); if(timerRef.current)clearInterval(timerRef.current);
+      showToast('Encoding…');
+      enc.flush().then(()=>{
+        enc.close(); mux.finalize();
+        const blob=new Blob([tgt.buffer],{type:'video/mp4'});
+        dl(blob,'mockup.mp4'); showToast('✓ Saved — H.264 hardware quality');
+      }).catch((e:Error)=>{ console.error(e); showToast('Export failed',true); });
+    } else {
+      recorderRef.current?.stop(); if(timerRef.current)clearInterval(timerRef.current);
+    }
     const ae=audioElRef.current; if(ae){ae.pause();ae.currentTime=0;}
     audioCtxRef.current?.close(); audioCtxRef.current=null;
   },[]);
