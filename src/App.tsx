@@ -974,7 +974,7 @@ export default function App(){
       }
 
       // WebCodecs: feed VideoFrame to hardware H.264 encoder each rAF tick
-      if(videoEncoderRef.current&&(videoEncoderRef.current.encodeQueueSize??0)<10){
+      if(videoEncoderRef.current){
         try{
           const VF=(window as any).VideoFrame;
           const srcCvs=(exportRatioRef.current!=='16:9'&&outCanvasRef.current)?outCanvasRef.current:canvas;
@@ -1201,7 +1201,7 @@ export default function App(){
         bitrate:quality==='ultra'?15_000_000:10_000_000,
         framerate:60,
         hardwareAcceleration:'prefer-hardware',
-        latencyMode:'quality',
+        latencyMode:'realtime',
       });
       videoEncoderRef.current=enc; muxerRef.current=mux; muxerTargetRef.current=tgt;
       recStartTimeRef.current=performance.now(); recFrameRef.current=0;
