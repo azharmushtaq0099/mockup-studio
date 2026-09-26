@@ -32,31 +32,56 @@ void main() {
 }
 `;
 
-// Improved chroma key: combined RGB + direction distance, per-channel spill
+// Chroma key v2: highp, saturation gate, luminance-preserving spill suppression
 const FRAG_CHROMA = `
-precision mediump float;
+precision highp float;
 uniform sampler2D uTex;
 uniform vec3 uKey;
 uniform float uThresh;
 uniform float uSoft;
+uniform float uSpill;
 varying vec3 vUVW;
 void main() {
-  vec4 c = texture2D(uTex, vUVW.xy / vUVW.z);
-  float cLen = max(0.001, length(c.rgb));
-  float kLen = max(0.001, length(uKey));
-  float cosAngle = dot(c.rgb/cLen, uKey/kLen);
-  float dist = distance(c.rgb, uKey);
-  float combined = dist * (1.0 + max(0.0, 1.0 - cosAngle) * 0.4);
-  float alpha = smoothstep(uThresh - uSoft, uThresh + uSoft, combined);
+  vec2 uv = vUVW.xy / vUVW.z;
+  vec4 c = texture2D(uTex, uv);
   vec3 col = c.rgb;
-  float spill = 1.0 - alpha;
-  if (uKey.g >= uKey.r && uKey.g >= uKey.b)
-    col.g = mix(col.g, min(col.g, max(col.r, col.b)), spill * 0.85);
-  else if (uKey.b >= uKey.r && uKey.b >= uKey.g)
-    col.b = mix(col.b, min(col.b, max(col.r, col.g)), spill * 0.85);
-  else
-    col.r = mix(col.r, min(col.r, max(col.g, col.b)), spill * 0.85);
-  gl_FragColor = vec4(col, alpha);
+
+  // Angle-weighted distance in RGB space
+  float cLen = max(0.001, length(col));
+  float kLen = max(0.001, length(uKey));
+  float cosA = dot(col/cLen, uKey/kLen);
+  float dist = distance(col, uKey);
+  float combined = dist * (1.0 + max(0.0, 1.0 - cosA) * 0.5);
+
+  // Saturation gate — protect desaturated/dark pixels (reflections, shadows, bezel)
+  float maxC = max(col.r, max(col.g, col.b));
+  float minC = min(col.r, min(col.g, col.b));
+  float sat = maxC > 0.001 ? (maxC - minC) / maxC : 0.0;
+  float satGate = smoothstep(0.06, 0.22, sat); // <6% sat = fully preserve
+
+  float rawAlpha = smoothstep(uThresh - uSoft, uThresh + uSoft, combined);
+  float alpha = mix(1.0, rawAlpha, satGate);
+
+  // Luminance-preserving spill suppression (uSpill = user despill strength)
+  float spill = (1.0 - rawAlpha) * satGate * uSpill;
+  if(spill > 0.001) {
+    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    if(uKey.g >= uKey.r && uKey.g >= uKey.b) {
+      float excess = col.g - max(col.r, col.b);
+      col.g -= max(0.0, excess) * spill * 0.95;
+    } else if(uKey.b >= uKey.r) {
+      float excess = col.b - max(col.r, col.g);
+      col.b -= max(0.0, excess) * spill * 0.95;
+    } else {
+      float excess = col.r - max(col.g, col.b);
+      col.r -= max(0.0, excess) * spill * 0.95;
+    }
+    // Restore original luminance to prevent darkening at edges
+    float newLum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    if(newLum > 0.001) col *= lum / newLum;
+  }
+
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), alpha);
 }
 `;
 
@@ -116,6 +141,48 @@ void main(){
 }
 `;
 
+// Screen recording layer: cool color-temp shift + micro contrast
+// Edge feather still user-controlled via uEdge (same as FRAG_PLAIN)
+const FRAG_SCREEN_REC = `
+precision mediump float;
+uniform sampler2D uTex;
+uniform float uEdge;
+varying vec3 vUVW;
+void main() {
+  vec2 uv = vUVW.xy / vUVW.z;
+  vec4 c = texture2D(uTex, uv);
+  c.rgb = (c.rgb - 0.5) * 1.05 + 0.5;
+  c.r -= 0.008; c.b += 0.010;
+  if (uEdge > 0.5) {
+    float f = 0.05;
+    float a = smoothstep(0.0,f,uv.x)*smoothstep(0.0,f,1.0-uv.x)*
+              smoothstep(0.0,f,uv.y)*smoothstep(0.0,f,1.0-uv.y);
+    c.a *= a;
+  }
+  gl_FragColor = clamp(c,0.0,1.0);
+}
+`;
+
+// Screen surface FX overlay: glare streak, corner vignette, LCD scanlines
+const FRAG_SCREEN_FX = `
+precision mediump float;
+varying vec3 vUVW;
+void main() {
+  gl_FragColor = vec4(0.0);
+  vec2 uv = vUVW.xy / vUVW.z;
+  vec2 suv = vec2(uv.x, 1.0 - uv.y);
+  float g1 = max(0.0, 1.0 - suv.x*2.0 - suv.y*2.6) * 0.10;
+  float g2 = max(0.0, 1.0 - distance(suv, vec2(0.10,0.06))*5.0) * 0.05;
+  float glare = clamp(g1+g2, 0.0, 0.13);
+  vec2 vc = suv*2.0 - 1.0;
+  float vignette = dot(vc,vc) * 0.09;
+  float scan = (sin(suv.y*628.3)*0.5+0.5) * 0.010;
+  float net = glare - vignette - scan;
+  if(net > 0.0) gl_FragColor = vec4(1.0,1.0,1.0,net);
+  else          gl_FragColor = vec4(0.0,0.0,0.0,-net);
+}
+`;
+
 // Post: sharpen · contrast · sat · temp · bloom · vignette · grain
 const FRAG_POST = `
 precision mediump float;
@@ -168,14 +235,18 @@ void main() {
 // ─── WebGL helpers ────────────────────────────────────────────────────────────
 
 function mkShader(gl: WebGLRenderingContext, type: number, src: string) {
-  const s = gl.createShader(type)!; gl.shaderSource(s,src); gl.compileShader(s); return s;
+  const s = gl.createShader(type)!; gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error('GL shader:',gl.getShaderInfoLog(s),src.slice(0,80));
+  return s;
 }
-function mkProgram(gl: WebGLRenderingContext, frag: string) {
+function mkProgram(gl: WebGLRenderingContext, frag: string, name='?') {
   const p = gl.createProgram()!;
-  gl.attachShader(p, mkShader(gl,gl.VERTEX_SHADER,VERT));
-  gl.attachShader(p, mkShader(gl,gl.FRAGMENT_SHADER,frag));
+  const vs=mkShader(gl,gl.VERTEX_SHADER,VERT);
+  const fs=mkShader(gl,gl.FRAGMENT_SHADER,frag);
+  gl.attachShader(p,vs); gl.attachShader(p,fs);
   gl.linkProgram(p);
-  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) console.error('GL link:',gl.getProgramInfoLog(p));
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))
+    console.error(`GL link [${name}]:`,gl.getProgramInfoLog(p),'| frag compile:',gl.getShaderInfoLog(fs));
   return p;
 }
 function mkTex(gl: WebGLRenderingContext): WebGLTexture {
@@ -282,25 +353,36 @@ function pinVerts(pins: Quad, W: number, H: number, N=32): Float32Array | null {
 
 // ─── Color utils ─────────────────────────────────────────────────────────────
 
-// Sample center 60% region of mockup — avoids device frame, better key detection
+// Sample center 60% of mockup — avoids device frame; finer buckets + real average for accuracy
 function detectKeyColor(img: HTMLImageElement): string {
-  const W=Math.min(img.naturalWidth,300),H=Math.min(img.naturalHeight,300);
+  const W=Math.min(img.naturalWidth,400), H=Math.min(img.naturalHeight,400);
   const c=document.createElement('canvas'); c.width=W; c.height=H;
   const ctx=c.getContext('2d')!; ctx.drawImage(img,0,0,W,H);
-  const x0=Math.floor(W*0.2),y0=Math.floor(H*0.2),sw=Math.floor(W*0.6),sh=Math.floor(H*0.6);
+  const x0=Math.floor(W*0.2), y0=Math.floor(H*0.2), sw=Math.floor(W*0.6), sh=Math.floor(H*0.6);
   const d=ctx.getImageData(x0,y0,sw,sh).data;
-  const hist: Record<string,number>={};
+  // Fine 16-step quantization (2× finer than old 32-step = ±8 accuracy vs ±16)
+  const hist: Record<string,{count:number;sr:number;sg:number;sb:number}>={};
   for(let i=0;i<d.length;i+=4){
     const r=d[i],g=d[i+1],b=d[i+2];
-    const max=Math.max(r,g,b),min=Math.min(r,g,b);
-    if(max<55||max>245||(max-min)/max<0.3) continue;
-    const k=`${Math.round(r/32)},${Math.round(g/32)},${Math.round(b/32)}`;
-    hist[k]=(hist[k]||0)+1;
+    const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+    if(mx<55||mx>248||(mx-mn)/mx<0.28) continue; // filter dark/blown/grey
+    const k=`${Math.round(r/16)},${Math.round(g/16)},${Math.round(b/16)}`;
+    if(!hist[k]) hist[k]={count:0,sr:0,sg:0,sb:0};
+    hist[k].count++; hist[k].sr+=r; hist[k].sg+=g; hist[k].sb+=b;
   }
-  const best=Object.entries(hist).sort((a,b)=>b[1]-a[1])[0];
+  type Bin={count:number;sr:number;sg:number;sb:number};
+  const score=(e:Bin)=>{
+    const r=e.sr/e.count,g=e.sg/e.count,b=e.sb/e.count;
+    const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+    return e.count*1000+(mx>0?(mx-mn)/mx*255:0);
+  };
+  const best=Object.values(hist).sort((a,b)=>score(b)-score(a))[0];
   if(!best) return '#00ff00';
-  const [qr,qg,qb]=best[0].split(',').map(n=>Math.min(255,Number(n)*32));
-  return `#${qr.toString(16).padStart(2,'0')}${qg.toString(16).padStart(2,'0')}${qb.toString(16).padStart(2,'0')}`;
+  // Return actual pixel average inside the bucket for sub-bucket precision
+  const ar=Math.round(best.sr/best.count);
+  const ag=Math.round(best.sg/best.count);
+  const ab=Math.round(best.sb/best.count);
+  return `#${ar.toString(16).padStart(2,'0')}${ag.toString(16).padStart(2,'0')}${ab.toString(16).padStart(2,'0')}`;
 }
 function hexToRgb(h:string):[number,number,number]{
   const v=parseInt(h.slice(1),16); return [(v>>16&255)/255,(v>>8&255)/255,(v&255)/255];
@@ -322,11 +404,12 @@ const GRADES:Record<GradeName,Enhance>={
   vivid:     {sharp:0.65, bright:0.02,  contrast:1.24, sat:1.32, vignette:0.14, temp:0.04,  grain:0.04, bloom:0.08},
 };
 
-type Preset={name:string;mode:Mode;grade:GradeName;enhance:Enhance;keyColor:string;keyThresh:number;keySoft:number};
+type Preset={name:string;mode:Mode;grade:GradeName;enhance:Enhance;keyColor:string;keyThresh:number;keySoft:number;pins?:Quad};
 type Mode='manual'|'auto';
 type ExportFmt='png'|'webm';
 type Quality='high'|'ultra';
 type ExportRatio='16:9'|'9:16'|'1:1';
+type TemplateItem={id:string;name:string;thumb:string;mockupData:string;pins:Quad;grade:GradeName;enhance:Enhance;ratio:ExportRatio;borderWidth:number;topBorder:boolean;edgeBlend:boolean;mockupOp:number;};
 
 // ─── Library ─────────────────────────────────────────────────────────────────
 
@@ -544,6 +627,14 @@ input[type=color]{width:32px;height:32px;border-radius:6px;border:1.5px solid va
   border-radius:7px;font-size:11px;color:var(--text);outline:none}
 .preset-input::placeholder{color:var(--muted)}
 .preset-input:focus{border-color:var(--accent)}
+.batch-drop{border:1.5px dashed var(--border);border-radius:9px;padding:8px 10px;
+  text-align:center;cursor:pointer;transition:all .18s;background:var(--surface);margin-bottom:6px}
+.batch-drop:hover{border-color:var(--accent);background:rgba(124,106,247,.05)}
+.batch-item{display:flex;align-items:center;justify-content:space-between;
+  padding:4px 8px;border-radius:6px;background:var(--surface);border:1px solid var(--border);
+  margin-bottom:3px;font-size:10px;color:var(--text)}
+.batch-item.active{border-color:var(--accent);background:rgba(124,106,247,.1);color:var(--accent)}
+.batch-item.done{opacity:0.38}
 
 .canvas-area{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;
   position:relative;background:radial-gradient(ellipse at center, #0E0E1C 0%, #07070F 100%)}
@@ -649,6 +740,7 @@ export default function App(){
   const [keyColor,  setKeyColor] = useState('#00ff00');
   const [keyThresh, setKeyThresh]= useState(0.38);
   const [keySoft,   setKeySoft]  = useState(0.14);
+  const [keySpill,  setKeySpill] = useState(0.90);
   const [grade,     setGrade]    = useState<GradeName>('natural');
   const [enhance,   setEnhance]  = useState<Enhance>(GRADES.natural);
   const [expandEnh, setExpandEnh]= useState(false);
@@ -665,12 +757,20 @@ export default function App(){
   const [expFmt,    setExpFmt]   = useState<ExportFmt>('png');
   const [quality,   setQuality]  = useState<Quality>('high');
   const [exportRatio,setExportRatio]=useState<ExportRatio>('16:9');
+  const [bgFill,    setBgFill]    = useState<'blur'|'black'>('blur');
   const [isRec,     setIsRec]    = useState(false);
   const [recTime,   setRecTime]  = useState(0);
+  const [isExporting,   setIsExporting]   = useState(false);
+  const [exportProgress,setExportProgress]= useState(0);
   const [toast,     setToast]    = useState<{msg:string;err?:boolean}|null>(null);
   const [zoom,      setZoom]     = useState(1.0);
   const [pan,       setPan]      = useState({x:0,y:0});
   const [edgeBlend,  setEdgeBlend]  = useState(true);
+  const [borderWidth,setBorderWidth]= useState(2);
+  const [topBorder,  setTopBorder]  = useState(false);
+  const [templates,  setTemplates]  = useState<TemplateItem[]>(()=>{try{return JSON.parse(localStorage.getItem('mockup_templates')||'[]');}catch{return [];}});
+  const [selTpls,    setSelTpls]    = useState<Set<string>>(()=>new Set());
+  const [tplBatchIdx,setTplBatchIdx]= useState<number|null>(null);
   const [mockupOp,   setMockupOp]   = useState(1.0);
   const [lumaKey,    setLumaKey]    = useState(0.0);
   const [lumaSoft,   setLumaSoft]   = useState(0.08);
@@ -680,6 +780,8 @@ export default function App(){
   const [audioSrc,   setAudioSrc]   = useState<string|null>(null);
   const [audioName,  setAudioName]  = useState('');
   const [audioVol,   setAudioVol]   = useState(0.8);
+  const [batchFiles, setBatchFiles] = useState<{name:string;url:string}[]>([]);
+  const [batchIdx,   setBatchIdx]   = useState<number|null>(null);
 
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const reflRef     = useRef<HTMLCanvasElement>(null);
@@ -693,6 +795,8 @@ export default function App(){
   const postRef     = useRef<WebGLProgram|null>(null);
   const cutoutRef   = useRef<WebGLProgram|null>(null);
   const blendRef    = useRef<WebGLProgram|null>(null);
+  const screenRecRef= useRef<WebGLProgram|null>(null);
+  const screenFxRef = useRef<WebGLProgram|null>(null);
   const fboRef      = useRef<FBO|null>(null);
   const mTexRef     = useRef<WebGLTexture|null>(null);
   const rTexRef     = useRef<WebGLTexture|null>(null);
@@ -711,6 +815,7 @@ export default function App(){
   const keyClrRef   = useRef<[number,number,number]>([0,1,0]);
   const keyTRef     = useRef(0.38);
   const keySRef     = useRef(0.14);
+  const keySpillRef = useRef(0.90);
   const enhRef      = useRef<Enhance>(GRADES.natural);
   const trimInRef   = useRef(0);
   const trimOutRef  = useRef(1);
@@ -718,8 +823,10 @@ export default function App(){
   const recorderRef = useRef<MediaRecorder|null>(null);
   const chunksRef   = useRef<Blob[]>([]);
   const timerRef    = useRef<ReturnType<typeof setInterval>|null>(null);
-  const edgeBlendRef = useRef(true);
-  const mockupOpRef  = useRef(1.0);
+  const edgeBlendRef   = useRef(true);
+  const borderWidthRef = useRef(2);
+  const topBorderRef   = useRef(false);
+  const mockupOpRef    = useRef(1.0);
   const lumaKeyRef   = useRef(0.0);
   const lumaSoftRef  = useRef(0.08);
   const chromaKeyRef  = useRef(0.0);
@@ -733,12 +840,18 @@ export default function App(){
   const videoTrackRef  = useRef<{requestFrame():void}|null>(null);
   const outCanvasRef   = useRef<HTMLCanvasElement|null>(null);
   const exportRatioRef = useRef<ExportRatio>('16:9');
+  const bgFillRef      = useRef<'blur'|'black'>('blur');
   const videoEncoderRef = useRef<any>(null);
   const muxerRef        = useRef<any>(null);
   const muxerTargetRef  = useRef<any>(null);
   const recStartTimeRef = useRef(0);
   const recFrameRef     = useRef(0);
   const useWebCodecsRef = useRef(false);
+  const renderOneFrameRef = useRef<(()=>void)|null>(null);
+  const isBatchingRef    = useRef(false);
+  const batchOnDoneRef   = useRef<(()=>void)|null>(null);
+  const batchFilenameRef = useRef<string|null>(null);
+  const autoStopRef      = useRef<(()=>void)|null>(null);
 
   useEffect(()=>{pinsRef.current=pins},[pins]);
   useEffect(()=>{cszRef.current=csz},[csz]);
@@ -747,12 +860,15 @@ export default function App(){
   useEffect(()=>{keyClrRef.current=hexToRgb(keyColor)},[keyColor]);
   useEffect(()=>{keyTRef.current=keyThresh},[keyThresh]);
   useEffect(()=>{keySRef.current=keySoft},[keySoft]);
+  useEffect(()=>{keySpillRef.current=keySpill},[keySpill]);
   useEffect(()=>{enhRef.current=enhance},[enhance]);
   useEffect(()=>{trimInRef.current=trimIn},[trimIn]);
   useEffect(()=>{trimOutRef.current=trimOut},[trimOut]);
   useEffect(()=>{zoomRef.current=zoom},[zoom]);
   useEffect(()=>{panRef.current=pan},[pan]);
   useEffect(()=>{edgeBlendRef.current=edgeBlend},[edgeBlend]);
+  useEffect(()=>{borderWidthRef.current=borderWidth},[borderWidth]);
+  useEffect(()=>{topBorderRef.current=topBorder},[topBorder]);
   useEffect(()=>{mockupOpRef.current=mockupOp},[mockupOp]);
   useEffect(()=>{lumaKeyRef.current=lumaKey},[lumaKey]);
   useEffect(()=>{lumaSoftRef.current=lumaSoft},[lumaSoft]);
@@ -760,19 +876,23 @@ export default function App(){
   useEffect(()=>{textItemsRef.current=textItems},[textItems]);
   useEffect(()=>{audioVolRef.current=audioVol; if(audioElRef.current) audioElRef.current.volume=audioVol;},[audioVol]);
   useEffect(()=>{ exportRatioRef.current=exportRatio; },[exportRatio]);
+  useEffect(()=>{ bgFillRef.current=bgFill; },[bgFill]);
 
   // ── Init WebGL ──────────────────────────────────────────────────────────────
   useEffect(()=>{
+    if(glRef.current) return; // guard: React Strict Mode double-invoke
     const canvas=canvasRef.current!;
     // antialias:true — hardware MSAA eliminates mesh boundary jagging
     const gl=canvas.getContext('webgl',{preserveDrawingBuffer:true,alpha:false,antialias:true});
     if(!gl) return;
     glRef.current=gl;
-    plainRef.current  =mkProgram(gl,FRAG_PLAIN);
-    chromaRef.current =mkProgram(gl,FRAG_CHROMA);
-    postRef.current   =mkProgram(gl,FRAG_POST);
-    cutoutRef.current =mkProgram(gl,FRAG_CUTOUT);
-    blendRef.current  =mkProgram(gl,FRAG_BLEND);
+    plainRef.current  =mkProgram(gl,FRAG_PLAIN,'plain');
+    chromaRef.current =mkProgram(gl,FRAG_CHROMA,'chroma');
+    postRef.current   =mkProgram(gl,FRAG_POST,'post');
+    cutoutRef.current  =mkProgram(gl,FRAG_CUTOUT,'cutout');
+    blendRef.current   =mkProgram(gl,FRAG_BLEND,'blend');
+    screenRecRef.current=mkProgram(gl,FRAG_SCREEN_REC,'screenRec');
+    screenFxRef.current =mkProgram(gl,FRAG_SCREEN_FX,'screenFx');
     mTexRef.current  =mkTex(gl); rTexRef.current=mkTex(gl); textTexRef.current=mkTex(gl);
     fboRef.current   =createFBO(gl,canvas.width,canvas.height);
     const tc=document.createElement('canvas'); tc.width=canvas.width; tc.height=canvas.height;
@@ -780,7 +900,7 @@ export default function App(){
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
 
     let frameCount=0;
-    function frame(){
+    const renderOnce=()=>{
       frameCount++;
       const gl=glRef.current!,plain=plainRef.current!,chroma=chromaRef.current!,
             post=postRef.current!,fbo=fboRef.current!,mt=mTexRef.current!,rt=rTexRef.current!;
@@ -819,7 +939,11 @@ export default function App(){
               if(mReadyRef.current){
                 drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
               }
-              drawQuad(gl,plain,rt,vt,{uEdge:ue});
+              // Recording with screen color grade (edge feather still user-controlled)
+              const srec=screenRecRef.current||plain;
+              drawQuad(gl,srec,rt,vt,{uEdge:ue});
+              // Glass surface overlay: glare streak + corner vignette + scanlines
+              if(screenFxRef.current) drawQuad(gl,screenFxRef.current,rt,vt,{});
             } else if(mReadyRef.current){
               drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
             }
@@ -834,7 +958,7 @@ export default function App(){
         }
         if(mReadyRef.current){
           if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
-          drawQuad(gl,chroma,mt,bgVerts(),{uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current});
+          drawQuad(gl,chroma,mt,bgVerts(),{uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current});
         }
       }
 
@@ -886,22 +1010,33 @@ export default function App(){
             });
             ctx2d.restore();
           }
-          // Thin bezel border — left, bottom, right only (top excluded per user preference)
+          // Bezel border — left/bottom/right always, top optional (white)
           if(hasRecForBorder){
             const {w:dW2,h:dH2}=cszRef.current;
             const sx2=dW2>0?W/dW2:1,sy2=dH2>0?H/dH2:1;
             const np2=pinsRef.current.map(p=>({x:p.x*sx2,y:p.y*sy2}));
             // np2[0]=TL, np2[1]=TR, np2[2]=BR, np2[3]=BL
+            const lw=Math.max(borderWidthRef.current,Math.round(borderWidthRef.current*scl));
             ctx2d.save();
-            ctx2d.strokeStyle='rgba(0,0,0,0.92)';
-            ctx2d.lineWidth=Math.max(2,Math.round(2*scl));
             ctx2d.lineJoin='round';
+            // Left, bottom, right (dark)
+            ctx2d.strokeStyle='rgba(0,0,0,0.92)';
+            ctx2d.lineWidth=lw;
             ctx2d.beginPath();
-            ctx2d.moveTo(np2[0].x,np2[0].y); // start at TL
-            ctx2d.lineTo(np2[3].x,np2[3].y); // left edge → BL
-            ctx2d.lineTo(np2[2].x,np2[2].y); // bottom edge → BR
-            ctx2d.lineTo(np2[1].x,np2[1].y); // right edge → TR
+            ctx2d.moveTo(np2[0].x,np2[0].y);
+            ctx2d.lineTo(np2[3].x,np2[3].y);
+            ctx2d.lineTo(np2[2].x,np2[2].y);
+            ctx2d.lineTo(np2[1].x,np2[1].y);
             ctx2d.stroke();
+            // Top edge (white, optional)
+            if(topBorderRef.current){
+              ctx2d.strokeStyle='rgba(255,255,255,0.90)';
+              ctx2d.lineWidth=lw;
+              ctx2d.beginPath();
+              ctx2d.moveTo(np2[0].x,np2[0].y);
+              ctx2d.lineTo(np2[1].x,np2[1].y);
+              ctx2d.stroke();
+            }
             ctx2d.restore();
           }
 
@@ -961,10 +1096,15 @@ export default function App(){
         const glc=canvasRef.current;
         if(octx&&glc){
           const dw=oc.width,dh=oc.height,sa=W/H,da=dw/dh;
-          // Blurred background — slightly oversized to hide blur-edge artifacts
+          // Background fill
           octx.save();
-          octx.filter='blur(28px) brightness(0.28) saturate(1.6)';
-          octx.drawImage(glc,-60,-60,dw+120,dh+120);
+          if(bgFillRef.current==='blur'){
+            octx.filter='blur(28px) brightness(0.28) saturate(1.6)';
+            octx.drawImage(glc,-60,-60,dw+120,dh+120);
+          } else {
+            octx.fillStyle='#000';
+            octx.fillRect(0,0,dw,dh);
+          }
           octx.restore();
           // Main content centered, aspect-correct
           let mw:number,mh:number;
@@ -975,22 +1115,26 @@ export default function App(){
 
       // WebCodecs: feed VideoFrame to hardware H.264 encoder each rAF tick
       if(videoEncoderRef.current){
+        let _vf:any=null;
         try{
           const VF=(window as any).VideoFrame;
           const srcCvs=(exportRatioRef.current!=='16:9'&&outCanvasRef.current)?outCanvasRef.current:canvas;
           const ts=Math.round((performance.now()-recStartTimeRef.current)*1000);
-          const vf=new VF(srcCvs,{timestamp:ts});
-          videoEncoderRef.current.encode(vf,{keyFrame:recFrameRef.current%120===0});
-          vf.close(); recFrameRef.current++;
-        }catch{}
+          _vf=new VF(srcCvs,{timestamp:ts});
+          if(videoEncoderRef.current.state!=='closed'){
+            videoEncoderRef.current.encode(_vf,{keyFrame:recFrameRef.current%120===0});
+            recFrameRef.current++;
+          }
+        }catch{}finally{_vf?.close();}
       } else if(recorderRef.current?.state==='recording'){
         videoTrackRef.current?.requestFrame();
       }
 
-      rafRef.current=requestAnimationFrame(frame);
-    }
+    };
+    renderOneFrameRef.current=renderOnce;
+    function frame(){ renderOnce(); rafRef.current=requestAnimationFrame(frame); }
     rafRef.current=requestAnimationFrame(frame);
-    return()=>cancelAnimationFrame(rafRef.current);
+    return()=>{cancelAnimationFrame(rafRef.current);renderOneFrameRef.current=null;};
   },[]);
 
   useEffect(()=>{
@@ -1123,7 +1267,7 @@ export default function App(){
 
   const savePreset=useCallback(()=>{
     if(!presetName.trim()) return;
-    const p:Preset={name:presetName.trim(),mode,grade,enhance,keyColor,keyThresh,keySoft};
+    const p:Preset={name:presetName.trim(),mode,grade,enhance,keyColor,keyThresh,keySoft,pins:[...pins]};
     const updated=[...presets,p]; setPresets(updated);
     localStorage.setItem('mockup-presets',JSON.stringify(updated));
     setPresetName(''); showToast(`"${p.name}" saved`);
@@ -1132,7 +1276,8 @@ export default function App(){
   const loadPreset=useCallback((p:Preset)=>{
     setMode(p.mode);setGrade(p.grade);setEnhance(p.enhance);
     setKeyColor(p.keyColor);setKeyThresh(p.keyThresh);setKeySoft(p.keySoft);
-    showToast(`Loaded "${p.name}"`);
+    if(p.pins) setPins(p.pins);
+    showToast(`Loaded "${p.name}"${p.pins?' + pins':''}`);
   },[]);
 
   const deletePreset=useCallback((i:number)=>{
@@ -1181,6 +1326,19 @@ export default function App(){
         setIsRec(false);setRecTime(0);if(timerRef.current)clearInterval(timerRef.current);showToast('Saved!');};
       recorderRef.current=rec; rec.start(500); setIsRec(true); setRecTime(0); setShowExp(false);
       timerRef.current=setInterval(()=>setRecTime(t=>t+1),1000);
+      // Auto-stop when recording reaches trim out
+      const rv=recVidRef.current;
+      if(rv&&rv.duration){
+        const onAutoStop=()=>{
+          if(rv.currentTime>=rv.duration*trimOutRef.current-0.12){
+            rv.removeEventListener('timeupdate',onAutoStop);autoStopRef.current=null;
+            rec.stop();recorderRef.current=null;
+            if(timerRef.current)clearInterval(timerRef.current);
+          }
+        };
+        autoStopRef.current=()=>rv.removeEventListener('timeupdate',onAutoStop);
+        rv.addEventListener('timeupdate',onAutoStop);
+      }
     };
 
     // WebCodecs — hardware H.264 encoder, genuine premium quality (Chrome 94+)
@@ -1188,17 +1346,35 @@ export default function App(){
     useWebCodecsRef.current=wcOK;
     if(!wcOK){ doMR(); return; }
 
-    import('mp4-muxer').then(({Muxer,ArrayBufferTarget}:any)=>{
+    // Cap resolution — hardware encoders typically max at 1920×1080 or 2560×1440
+    const maxDim=1920;
+    const scale=Math.min(1,maxDim/rW,maxDim/rH);
+    const encW=Math.floor(rW*scale/2)*2, encH=Math.floor(rH*scale/2)*2;
+
+    import('mp4-muxer').then(async ({Muxer,ArrayBufferTarget}:any)=>{
+      const VE=(window as any).VideoEncoder;
+      const br=quality==='ultra'?15_000_000:10_000_000;
+      const codecList=['avc1.4D4028','avc1.42E028','avc1.42E01E'];
+      let codec='';
+      for(const c of codecList){
+        try{const r=await VE.isConfigSupported({codec:c,width:encW,height:encH,bitrate:br,framerate:60});if(r.supported){codec=c;break;}}catch{}
+      }
+      if(!codec){showToast('No H.264 encoder — switching to MediaRecorder',true);useWebCodecsRef.current=false;doMR();return;}
       const tgt=new ArrayBufferTarget();
-      const mux=new Muxer({target:tgt,video:{codec:'avc',width:rW,height:rH},fastStart:'in-memory'});
-      const enc=new (window as any).VideoEncoder({
+      const mux=new Muxer({target:tgt,video:{codec:'avc',width:encW,height:encH},fastStart:'in-memory'});
+      const enc=new VE({
         output:(ch:any,mt:any)=>mux.addVideoChunk(ch,mt),
-        error:(e:Error)=>console.error('VideoEncoder:',e),
+        error:(e:Error)=>{
+          console.error('VideoEncoder:',e);videoEncoderRef.current=null;
+          setIsRec(false);setRecTime(0);if(timerRef.current)clearInterval(timerRef.current);
+          showToast('Encoder error — switching to MediaRecorder',true);
+          useWebCodecsRef.current=false;doMR();
+        },
       });
       enc.configure({
-        codec:'avc1.640028',         // H.264 High Profile — GPU hardware encoder
-        width:rW, height:rH,
-        bitrate:quality==='ultra'?15_000_000:10_000_000,
+        codec,
+        width:encW, height:encH,
+        bitrate:br,
         framerate:60,
         hardwareAcceleration:'prefer-hardware',
         latencyMode:'realtime',
@@ -1207,6 +1383,27 @@ export default function App(){
       recStartTimeRef.current=performance.now(); recFrameRef.current=0;
       setIsRec(true); setRecTime(0); setShowExp(false);
       timerRef.current=setInterval(()=>setRecTime(t=>t+1),1000);
+      // Auto-stop at trim out
+      const rv=recVidRef.current;
+      if(rv&&rv.duration){
+        const onAutoStop=()=>{
+          if(rv.currentTime>=rv.duration*trimOutRef.current-0.12){
+            rv.removeEventListener('timeupdate',onAutoStop);autoStopRef.current=null;
+            const e2=videoEncoderRef.current,m2=muxerRef.current,t2=muxerTargetRef.current;
+            videoEncoderRef.current=null;
+            setIsRec(false);setRecTime(0);if(timerRef.current)clearInterval(timerRef.current);
+            showToast('Encoding…');
+            if(e2&&e2.state!=='closed'){
+              e2.flush().then(()=>{
+                e2.close();m2?.finalize();
+                if(t2?.buffer&&t2.buffer.byteLength>0){dl(new Blob([t2.buffer],{type:'video/mp4'}),'mockup.mp4');showToast('✓ Saved!');}
+              }).catch((err:Error)=>showToast('Export failed: '+(err?.message||'unknown'),true));
+            } else showToast('Encoder not ready',true);
+          }
+        };
+        autoStopRef.current=()=>rv.removeEventListener('timeupdate',onAutoStop);
+        rv.addEventListener('timeupdate',onAutoStop);
+      }
       const ae=audioElRef.current;
       if(ae&&ae.src){try{const a=new AudioContext();audioCtxRef.current=a;
         const s=a.createMediaElementSource(ae);s.connect(a.destination);
@@ -1215,22 +1412,292 @@ export default function App(){
   },[quality]);
 
   const stopRec=useCallback(()=>{
+    autoStopRef.current?.(); autoStopRef.current=null;
     if(useWebCodecsRef.current&&videoEncoderRef.current){
       const enc=videoEncoderRef.current, mux=muxerRef.current, tgt=muxerTargetRef.current;
       videoEncoderRef.current=null;
       setIsRec(false); setRecTime(0); if(timerRef.current)clearInterval(timerRef.current);
       showToast('Encoding…');
+      if(enc.state==='closed'){showToast('Encoder closed — nothing to save',true);return;}
       enc.flush().then(()=>{
-        enc.close(); mux.finalize();
-        const blob=new Blob([tgt.buffer],{type:'video/mp4'});
-        dl(blob,'mockup.mp4'); showToast('✓ Saved — H.264 hardware quality');
-      }).catch((e:Error)=>{ console.error(e); showToast('Export failed',true); });
+        enc.close(); mux?.finalize();
+        if(tgt?.buffer&&tgt.buffer.byteLength>0){const blob=new Blob([tgt.buffer],{type:'video/mp4'});dl(blob,'mockup.mp4');showToast('✓ Saved!');}
+        else showToast('Export empty — record longer before stopping',true);
+      }).catch((e:Error)=>{ console.error(e); showToast('Export failed: '+(e?.message||'unknown'),true); });
     } else {
       recorderRef.current?.stop(); if(timerRef.current)clearInterval(timerRef.current);
     }
     const ae=audioElRef.current; if(ae){ae.pause();ae.currentTime=0;}
     audioCtxRef.current?.close(); audioCtxRef.current=null;
   },[]);
+
+  const startOfflineExport=useCallback(async()=>{
+    const vid=recVidRef.current;
+    if(!vid||!vid.src||!vid.duration){showToast('Load a screen recording first',true);return;}
+
+    const inT=trimInRef.current*vid.duration;
+    const outT=trimOutRef.current*vid.duration;
+    const clipDur=Math.max(0.1,outT-inT);
+    const glCvs=canvasRef.current!;
+    const ratio=exportRatioRef.current;
+
+    // ── Output dimensions ──────────────────────────────────────────────────
+    let outW:number,outH:number;
+    if(ratio==='9:16'){outW=1080;outH=1920;}
+    else if(ratio==='1:1'){outW=1080;outH=1080;}
+    else{const s=Math.min(1,1920/glCvs.width,1080/glCvs.height);outW=Math.floor(glCvs.width*s/2)*2;outH=Math.floor(glCvs.height*s/2)*2;}
+    if(ratio!=='16:9'){
+      if(!outCanvasRef.current)outCanvasRef.current=document.createElement('canvas');
+      outCanvasRef.current.width=outW;outCanvasRef.current.height=outH;
+    }
+
+    setIsExporting(true);setExportProgress(0);setShowExp(false);
+
+    // Seek to trim start before playback
+    await new Promise<void>(res=>{
+      const fn=()=>{vid.removeEventListener('seeked',fn);res();};
+      vid.addEventListener('seeked',fn);vid.currentTime=inT;
+    });
+    // Also restart background video from its current position
+    const bgVid=mockupVidRef.current;
+    if(mIsVRef.current&&bgVid&&bgVid.duration) bgVid.play().catch(()=>{});
+
+    const VE=(window as any).VideoEncoder;
+    const VF=(window as any).VideoFrame;
+
+    // ── MediaRecorder fallback (Safari / Firefox) ──────────────────────────
+    if(!VE||!VF){
+      try{
+        const capCvs=(ratio!=='16:9'&&outCanvasRef.current)?outCanvasRef.current:glCvs;
+        const mime=MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')?'video/mp4;codecs=avc1'
+          :MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
+        const ext=mime.startsWith('video/mp4')?'mp4':'webm';
+        const cs=(capCvs as any).captureStream(60) as MediaStream;
+        const rec=new MediaRecorder(cs,{mimeType:mime,videoBitsPerSecond:quality==='ultra'?80_000_000:40_000_000});
+        chunksRef.current=[];
+        rec.ondataavailable=e=>{if(e.data.size>0)chunksRef.current.push(e.data);};
+        await new Promise<void>((resolve,reject)=>{
+          rec.onstop=()=>{
+            const fname=batchFilenameRef.current||`mockup.${ext}`;batchFilenameRef.current=null;
+            dl(new Blob(chunksRef.current,{type:mime}),fname);showToast('✓ Saved!');resolve();
+          };
+          const onTU=()=>{
+            setExportProgress(Math.min(0.95,(vid.currentTime-inT)/clipDur));
+            if(vid.currentTime>=outT-0.1||vid.ended){
+              vid.removeEventListener('timeupdate',onTU);rec.stop();recorderRef.current=null;
+            }
+          };
+          vid.addEventListener('timeupdate',onTU);
+          rec.start(200);recorderRef.current=rec;
+          vid.play().catch(reject);
+        });
+      }catch(e){showToast('Export failed: '+(e as Error).message,true);}
+      finally{setIsExporting(false);setExportProgress(0);vid.pause();
+        const done=batchOnDoneRef.current;batchOnDoneRef.current=null;done?.();}
+      return;
+    }
+
+    // ── WebCodecs real-time path — let video play, rAF loop feeds encoder ──
+    try{
+      const {Muxer,ArrayBufferTarget}=await import('mp4-muxer') as any;
+      const tgt=new ArrayBufferTarget();
+      const mux=new Muxer({target:tgt,video:{codec:'avc',width:outW,height:outH},fastStart:'in-memory',firstTimestampBehavior:'offset'});
+      const br=quality==='ultra'?15_000_000:10_000_000;
+
+      const codecList=['avc1.4D4028','avc1.42E028','avc1.42E01E'];
+      let codec='';
+      for(const c of codecList){
+        try{const r=await VE.isConfigSupported({codec:c,width:outW,height:outH,bitrate:br,framerate:60});
+          if(r.supported){codec=c;break;}}catch{}
+      }
+      if(!codec)throw new Error('No H.264 encoder — update Chrome');
+
+      const enc=new VE({
+        output:(ch:any,mt:any)=>mux.addVideoChunk(ch,mt),
+        error:(e:Error)=>console.error('VE:',e),
+      });
+      enc.configure({codec,width:outW,height:outH,bitrate:br,framerate:60,
+        hardwareAcceleration:'prefer-hardware',latencyMode:'quality'});
+      await new Promise(r=>setTimeout(r,80));
+      if(enc.state==='closed'){
+        // Hardware encoder refused — fall back to MediaRecorder silently
+        try{enc.close();}catch{}
+        const capCvs=(ratio!=='16:9'&&outCanvasRef.current)?outCanvasRef.current:glCvs;
+        const mime=MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')?'video/mp4;codecs=avc1'
+          :MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
+        const ext=mime.startsWith('video/mp4')?'mp4':'webm';
+        const cs=(capCvs as any).captureStream(60) as MediaStream;
+        const mrec=new MediaRecorder(cs,{mimeType:mime,videoBitsPerSecond:quality==='ultra'?80_000_000:40_000_000});
+        chunksRef.current=[];
+        mrec.ondataavailable=(ev:any)=>{if(ev.data.size>0)chunksRef.current.push(ev.data);};
+        await new Promise<void>((resolve,reject)=>{
+          mrec.onstop=()=>{
+            const fname=batchFilenameRef.current||`mockup.${ext}`;batchFilenameRef.current=null;
+            dl(new Blob(chunksRef.current,{type:mime}),fname);showToast('✓ Saved!');resolve();
+          };
+          const onTU=()=>{
+            setExportProgress(Math.min(0.95,(vid.currentTime-inT)/clipDur));
+            if(vid.currentTime>=outT-0.1||vid.ended){vid.removeEventListener('timeupdate',onTU);mrec.stop();recorderRef.current=null;}
+          };
+          vid.addEventListener('timeupdate',onTU);
+          mrec.start(200);recorderRef.current=mrec;
+          vid.play().catch(reject);
+        });
+        return;
+      }
+
+      // Wire encoder into rAF loop — renderOnce feeds VideoFrames automatically
+      recStartTimeRef.current=performance.now();
+      recFrameRef.current=0;
+      videoEncoderRef.current=enc;
+
+      // Play video — rAF loop encodes each rendered frame at natural speed
+      await new Promise<void>((resolve,reject)=>{
+        const onTU=()=>{
+          setExportProgress(Math.min(0.95,(vid.currentTime-inT)/clipDur));
+          if(vid.currentTime>=outT-0.05||vid.ended){
+            vid.removeEventListener('timeupdate',onTU);
+            vid.removeEventListener('error',onErr);
+            vid.pause();resolve();
+          }
+        };
+        const onErr=()=>{vid.removeEventListener('timeupdate',onTU);vid.removeEventListener('error',onErr);reject(new Error('Playback error'));};
+        vid.addEventListener('timeupdate',onTU);
+        vid.addEventListener('error',onErr);
+        vid.play().catch(reject);
+      });
+
+      videoEncoderRef.current=null;
+      setExportProgress(0.99);
+      await enc.flush();enc.close();mux.finalize();
+      const fname=batchFilenameRef.current||'mockup.mp4';batchFilenameRef.current=null;
+      dl(new Blob([tgt.buffer],{type:'video/mp4'}),fname);
+      showToast('✓ Export complete!');
+    }catch(e){
+      videoEncoderRef.current=null;
+      console.error('Export error:',e);
+      showToast('Export failed: '+(e as Error).message,true);
+    }finally{
+      setIsExporting(false);setExportProgress(0);
+      videoEncoderRef.current=null;
+      vid.pause();
+      const done=batchOnDoneRef.current;batchOnDoneRef.current=null;done?.();
+    }
+  },[quality]);
+
+  // ── Template system ───────────────────────────────────────────────────────────
+  const saveCurrentTemplate=useCallback(async(name:string)=>{
+    if(!mockupSrc){showToast('Load a mockup first',true);return;}
+    const toBase64=(src:string,maxW:number,q:number)=>new Promise<string>((res,rej)=>{
+      const img=new Image(); img.crossOrigin='anonymous';
+      img.onload=()=>{
+        const s=Math.min(1,maxW/img.naturalWidth);
+        const cvs=document.createElement('canvas');
+        cvs.width=Math.round(img.naturalWidth*s); cvs.height=Math.round(img.naturalHeight*s);
+        cvs.getContext('2d')!.drawImage(img,0,0,cvs.width,cvs.height);
+        res(cvs.toDataURL('image/jpeg',q));
+      };
+      img.onerror=rej; img.src=src;
+    });
+    try{
+      const [mockupData,thumb]=await Promise.all([toBase64(mockupSrc,1280,0.82),toBase64(mockupSrc,200,0.70)]);
+      const t:TemplateItem={id:Date.now().toString(),name,thumb,mockupData,pins:[...pins] as Quad,
+        grade,enhance,ratio:exportRatio as ExportRatio,borderWidth,topBorder,edgeBlend,mockupOp};
+      const updated=[...templates,t];
+      setTemplates(updated);
+      try{localStorage.setItem('mockup_templates',JSON.stringify(updated));}catch{showToast('Storage full — delete old templates',true);return;}
+      showToast(`✓ Template "${name}" saved`);
+    }catch{showToast('Failed to save template',true);}
+  },[mockupSrc,pins,grade,enhance,exportRatio,borderWidth,topBorder,edgeBlend,mockupOp,templates]);
+
+  const deleteTemplate=useCallback((id:string)=>{
+    const updated=templates.filter(t=>t.id!==id);
+    setTemplates(updated); setSelTpls(s=>{const n=new Set(s);n.delete(id);return n;});
+    try{localStorage.setItem('mockup_templates',JSON.stringify(updated));}catch{}
+  },[templates]);
+
+  const runTemplateBatch=useCallback(async()=>{
+    if(isBatchingRef.current||selTpls.size===0){showToast('Select templates first',true);return;}
+    if(!rReadyRef.current){showToast('Load a recording first',true);return;}
+    isBatchingRef.current=true;
+    const selected=templates.filter(t=>selTpls.has(t.id));
+    for(let i=0;i<selected.length;i++){
+      const t=selected[i]; setTplBatchIdx(i);
+      // Load template mockup
+      mReadyRef.current=false;
+      loadMockupMedia(t.mockupData,false);
+      // Wait up to 5s for mockup
+      await new Promise<void>(resolve=>{
+        const chk=setInterval(()=>{if(mReadyRef.current){clearInterval(chk);resolve();}},50);
+        setTimeout(()=>{clearInterval(chk);resolve();},5000);
+      });
+      // Apply template settings (direct ref + state)
+      setPins(t.pins as Quad); pinsRef.current=t.pins as Quad;
+      setGrade(t.grade); setEnhance(t.enhance); enhRef.current=t.enhance;
+      setExportRatio(t.ratio); exportRatioRef.current=t.ratio;
+      setBorderWidth(t.borderWidth); borderWidthRef.current=t.borderWidth;
+      setTopBorder(t.topBorder); topBorderRef.current=t.topBorder;
+      setEdgeBlend(t.edgeBlend); edgeBlendRef.current=t.edgeBlend;
+      setMockupOp(t.mockupOp); mockupOpRef.current=t.mockupOp;
+      await new Promise(r=>setTimeout(r,250));
+      batchFilenameRef.current=`${t.name}_mockup.mp4`;
+      await new Promise<void>(resolve=>{batchOnDoneRef.current=resolve;startOfflineExport();});
+      await new Promise(r=>setTimeout(r,400));
+    }
+    isBatchingRef.current=false; setTplBatchIdx(null);
+    showToast(`✓ Template batch done — ${selected.length} exports`);
+  },[selTpls,templates,startOfflineExport]);
+
+  const runAllFormats=useCallback(async()=>{
+    if(isBatchingRef.current){showToast('Already exporting',true);return;}
+    if(!recSrc||!rReadyRef.current){showToast('Load a recording first',true);return;}
+    isBatchingRef.current=true;
+    const origRatio=exportRatioRef.current;
+    const fmts:[ExportRatio,string][]=[['9:16','reels'],['1:1','square'],['16:9','landscape']];
+    for(const [r,label] of fmts){
+      exportRatioRef.current=r; setExportRatio(r);
+      await new Promise(x=>setTimeout(x,120));
+      batchFilenameRef.current=`mockup_${label}.mp4`;
+      await new Promise<void>(resolve=>{batchOnDoneRef.current=resolve;startOfflineExport();});
+      await new Promise(x=>setTimeout(x,350));
+    }
+    exportRatioRef.current=origRatio; setExportRatio(origRatio);
+    isBatchingRef.current=false;
+    showToast('✓ 3 formats exported — reels · square · landscape');
+  },[recSrc,startOfflineExport]);
+
+  const runBatch=useCallback(async()=>{
+    if(isBatchingRef.current||batchFiles.length===0) return;
+    const VE=(window as any).VideoEncoder;
+    if(!VE){showToast('Batch export requires Chrome 94+',true);return;}
+    isBatchingRef.current=true;
+    const files=[...batchFiles];
+    for(let i=0;i<files.length;i++){
+      setBatchIdx(i);
+      const {url,name}=files[i];
+      await new Promise<void>(resolve=>{
+        const vid=recVidRef.current; if(!vid){resolve();return;}
+        rReadyRef.current=false; rStaticRef.current=false;
+        setTrimIn(0); setTrimOut(1);
+        trimInRef.current=0; trimOutRef.current=1;
+        vid.src=url; vid.loop=false; vid.muted=true; vid.playsInline=true;
+        vid.onloadedmetadata=()=>{setRecNative({w:vid.videoWidth||1920,h:vid.videoHeight||1080});setRecDur(vid.duration||0);};
+        vid.oncanplay=()=>{rReadyRef.current=true;vid.play().catch(()=>{});resolve();};
+        vid.onerror=()=>resolve();
+        vid.load();
+      });
+      if(!rReadyRef.current){showToast(`Skipped: ${name}`,true);continue;}
+      await new Promise(r=>setTimeout(r,350));
+      batchFilenameRef.current=name.replace(/\.[^.]+$/,'')+'_mockup.mp4';
+      await new Promise<void>(resolve=>{
+        batchOnDoneRef.current=resolve;
+        startOfflineExport();
+      });
+      await new Promise(r=>setTimeout(r,400));
+    }
+    setBatchIdx(null); isBatchingRef.current=false; setBatchFiles([]);
+    showToast(`✓ Batch done — ${files.length} exports saved`);
+  },[batchFiles,startOfflineExport]);
 
   function showToast(msg:string,err=false){setToast({msg,err});setTimeout(()=>setToast(null),3000);}
   const fmt=(s:number)=>`${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
@@ -1313,6 +1780,19 @@ export default function App(){
                   <div className="grade-row" style={{marginBottom:12}}>
                     <button className={`grade-btn${!edgeBlend?' active':''}`} onClick={()=>setEdgeBlend(false)}>Sharp</button>
                     <button className={`grade-btn${edgeBlend?' active':''}`}  onClick={()=>setEdgeBlend(true)}>Soft Blend</button>
+                  </div>
+
+                  <div className="sec-title" style={{marginBottom:5}}>Border Width</div>
+                  <div className="grade-row" style={{marginBottom:8}}>
+                    {[1,2,3].map(w=>(
+                      <button key={w} className={`grade-btn${borderWidth===w?' active':''}`} onClick={()=>setBorderWidth(w)}>{w}px</button>
+                    ))}
+                  </div>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+                    <span style={{fontSize:11,color:'var(--muted)',flex:1}}>Top border</span>
+                    <button className={`grade-btn${topBorder?' active':''}`} onClick={()=>setTopBorder(v=>!v)}>
+                      {topBorder?'● White':'○ Off'}
+                    </button>
                   </div>
 
                   <Slider label="Mockup Opacity" min={0.1} max={1} step={0.02} value={mockupOp} onChange={setMockupOp}/>
@@ -1499,6 +1979,7 @@ export default function App(){
                   </div>
                   <Slider label="Threshold" min={0.05} max={0.8} step={0.01} value={keyThresh} onChange={setKeyThresh}/>
                   <Slider label="Softness"  min={0.01} max={0.4} step={0.01} value={keySoft}   onChange={setKeySoft}/>
+                  <Slider label="Despill"   min={0}    max={1}   step={0.01} value={keySpill}  onChange={setKeySpill}/>
                 </div>
               )}
 
@@ -1551,6 +2032,108 @@ export default function App(){
                   </div>
                 </>}
               </div>
+
+              {mockupSrc&&(
+                <div className="sec">
+                  <div className="sec-title">Batch Export</div>
+                  <p style={{fontSize:10,color:'var(--muted)',lineHeight:1.65,marginBottom:8}}>
+                    Drop multiple recordings — each gets exported with the current mockup, pins &amp; grade.
+                  </p>
+                  <div className="batch-drop"
+                    onDragOver={e=>e.preventDefault()}
+                    onDrop={e=>{
+                      e.preventDefault();
+                      const files=Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('video/')||/\.(mp4|webm|mov)$/i.test(f.name));
+                      setBatchFiles(prev=>[...prev,...files.map(f=>({name:f.name,url:URL.createObjectURL(f)}))]);
+                    }}
+                    onClick={()=>{
+                      const inp=document.createElement('input');inp.type='file';inp.accept='video/*';inp.multiple=true;
+                      inp.onchange=e=>{
+                        const files=Array.from((e.target as HTMLInputElement).files||[]);
+                        setBatchFiles(prev=>[...prev,...files.map(f=>({name:f.name,url:URL.createObjectURL(f)}))]);
+                      };inp.click();
+                    }}>
+                    <div className="drop-ico">🎬</div>
+                    <div className="drop-tx"><strong>{batchFiles.length?`${batchFiles.length} queued — add more`:'Add recordings'}</strong>MP4 · WebM · MOV</div>
+                  </div>
+                  {batchFiles.length>0&&(
+                    <>
+                      <div style={{maxHeight:130,overflowY:'auto',marginBottom:6}}>
+                        {batchFiles.map((f,i)=>(
+                          <div key={i} className={`batch-item${batchIdx===i?' active':batchIdx!==null&&i<batchIdx?' done':''}`}>
+                            <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1,marginRight:4}}>
+                              {batchIdx!==null&&i<batchIdx?'✓ ':batchIdx===i?'⚙ ':''}{f.name}
+                            </span>
+                            {batchIdx===null&&(
+                              <button onClick={()=>setBatchFiles(p=>p.filter((_,j)=>j!==i))}
+                                style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:11,flexShrink:0}}>✕</button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      {batchIdx!==null
+                        ?<div style={{fontSize:10,color:'var(--accent)',textAlign:'center',padding:'5px 0',fontWeight:600}}>
+                          Processing {batchIdx+1} / {batchFiles.length}…
+                        </div>
+                        :<>
+                          <button className="btn btn-export" style={{width:'100%',justifyContent:'center',fontSize:11,marginBottom:4}}
+                            onClick={runBatch}>
+                            ▶ Run Batch ({batchFiles.length})
+                          </button>
+                          <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:10}}
+                            onClick={()=>setBatchFiles([])}>Clear queue</button>
+                        </>
+                      }
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* ── Template Batch ─────────────────────────────────────── */}
+              {mockupSrc&&(
+                <div className="sec">
+                  <div className="sec-title" style={{marginBottom:6}}>Templates</div>
+                  <p style={{fontSize:10,color:'var(--muted)',lineHeight:1.65,marginBottom:8}}>
+                    Save the current mockup+pins+grade as a template. One recording → export through all selected templates.
+                  </p>
+                  {/* Save button */}
+                  <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:11,marginBottom:8}}
+                    onClick={()=>{
+                      const name=prompt('Template name (e.g. MacBook, iPhone 15):');
+                      if(name?.trim()) saveCurrentTemplate(name.trim());
+                    }}>+ Save Current as Template</button>
+
+                  {/* Template list */}
+                  {templates.length>0&&<>
+                    <div style={{display:'flex',flexDirection:'column',gap:4,marginBottom:8}}>
+                      {templates.map((t,i)=>(
+                        <div key={t.id} style={{display:'flex',alignItems:'center',gap:6,
+                          padding:'5px 7px',borderRadius:7,background:'var(--surface)',
+                          border:`1.5px solid ${selTpls.has(t.id)?'var(--accent)':'var(--border)'}`,
+                          cursor:'pointer',transition:'all .15s'}}
+                          onClick={()=>setSelTpls(s=>{const n=new Set(s);s.has(t.id)?n.delete(t.id):n.add(t.id);return n;})}>
+                          <img src={t.thumb} alt="" style={{width:40,height:26,objectFit:'cover',borderRadius:4,flexShrink:0}}/>
+                          <span style={{flex:1,fontSize:11,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.name}</span>
+                          {tplBatchIdx!==null&&templates.filter(x=>selTpls.has(x.id))[tplBatchIdx]?.id===t.id&&
+                            <span style={{fontSize:9,color:'var(--accent)'}}>●</span>}
+                          <button style={{background:'none',border:'none',color:'var(--muted)',cursor:'pointer',fontSize:13,padding:'0 2px'}}
+                            onClick={e=>{e.stopPropagation();deleteTemplate(t.id);}}>✕</button>
+                        </div>
+                      ))}
+                    </div>
+                    {selTpls.size>0&&(
+                      tplBatchIdx!==null
+                      ?<div style={{textAlign:'center',fontSize:11,color:'var(--accent)',padding:'6px 0'}}>
+                        Exporting template {tplBatchIdx+1}/{selTpls.size}…
+                      </div>
+                      :<button className="btn btn-export" style={{width:'100%',justifyContent:'center',fontSize:11}}
+                        onClick={runTemplateBatch}>
+                        ▶ Export {selTpls.size} Template{selTpls.size>1?'s':''}
+                      </button>
+                    )}
+                  </>}
+                </div>
+              )}
 
               <div className="sec">
                 <div className="sec-title">Quick guide</div>
@@ -1716,15 +2299,27 @@ export default function App(){
                       style={{flexDirection:'column',alignItems:'center'}}>
                       <span style={{fontSize:12,fontWeight:700}}>{r}</span>
                       <span style={{fontSize:8,opacity:.6,marginTop:2}}>
-                        {r==='16:9'?'LinkedIn · Twitter':r==='9:16'?'Reels · TikTok · Shorts':'Instagram'}
+                        {r==='16:9'?'LinkedIn · X':r==='9:16'?'Reels · TikTok':'Instagram'}
                       </span>
                     </div>
                   ))}
                 </div>
                 {exportRatio!=='16:9'&&(
-                  <div className="q-note" style={{color:'var(--accent)'}}>
-                    ✦ Blur background auto-added — your 16:9 mockup centered in frame
-                  </div>
+                  <>
+                    <div className="m-lbl" style={{marginTop:10}}>Background Fill</div>
+                    <div className="q-row">
+                      <div className={`q-btn${bgFill==='blur'?' active':''}`} onClick={()=>setBgFill('blur')}
+                        style={{flexDirection:'column',alignItems:'center'}}>
+                        <span style={{fontSize:11,fontWeight:700}}>Blurred</span>
+                        <span style={{fontSize:8,opacity:.6,marginTop:2}}>cinematic look</span>
+                      </div>
+                      <div className={`q-btn${bgFill==='black'?' active':''}`} onClick={()=>setBgFill('black')}
+                        style={{flexDirection:'column',alignItems:'center'}}>
+                        <span style={{fontSize:11,fontWeight:700}}>Black</span>
+                        <span style={{fontSize:8,opacity:.6,marginTop:2}}>clean bars</span>
+                      </div>
+                    </div>
+                  </>
                 )}
                 <div className="m-lbl">Quality</div>
                 <div className="q-row">
@@ -1739,8 +2334,37 @@ export default function App(){
               </>}
               {expFmt==='png'
                 ?<button className="btn btn-export" style={{width:'100%',justifyContent:'center',padding:10}} onClick={doExportPNG}>Export PNG</button>
-                :<button className="btn btn-export" style={{width:'100%',justifyContent:'center',padding:10}} onClick={startRec}>● Start Recording</button>}
+                :(recSrc&&!rStaticRef.current&&typeof (window as any).VideoEncoder!=='undefined'
+                  ?<div style={{display:'flex',flexDirection:'column',gap:6}}>
+                    <button className="btn btn-export" style={{width:'100%',justifyContent:'center',padding:10}} onClick={startOfflineExport}>
+                      ↓ Export MP4 — {exportRatio}
+                    </button>
+                    <button className="btn btn-export" style={{width:'100%',justifyContent:'center',padding:10,
+                      background:'linear-gradient(135deg,#7C6AF7,#5B9CF6)'}}
+                      onClick={()=>{setShowExp(false);runAllFormats();}}>
+                      ↓ Export All 3 Formats
+                      <span style={{fontSize:9,opacity:.7,marginLeft:6}}>reels · square · landscape</span>
+                    </button>
+                  </div>
+                  :<button className="btn btn-export" style={{width:'100%',justifyContent:'center',padding:10}} onClick={startRec}>● Start Recording</button>
+                )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {isExporting&&(
+        <div style={{position:'fixed',inset:0,background:'rgba(4,4,14,.93)',display:'flex',
+          flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:600}}>
+          <div style={{fontSize:13,fontWeight:700,color:'var(--text)',marginBottom:18,letterSpacing:'0.05em'}}>
+            Exporting — real-time H.264
+          </div>
+          <div style={{width:300,height:6,background:'var(--surface)',borderRadius:3,overflow:'hidden'}}>
+            <div style={{width:`${exportProgress*100}%`,height:'100%',background:'linear-gradient(90deg,#7C6AF7,#5B9CF6)',
+              transition:'width .25s linear',borderRadius:3}}/>
+          </div>
+          <div style={{color:'var(--muted)',fontSize:11,marginTop:10}}>
+            {Math.round(exportProgress*100)}% — keep this tab active &amp; visible
           </div>
         </div>
       )}
