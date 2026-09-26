@@ -372,36 +372,35 @@ function pinVerts(pins: Quad, W: number, H: number, N=32): Float32Array | null {
 
 // ─── Color utils ─────────────────────────────────────────────────────────────
 
-// Find the 4 extreme corners of the green screen area using diagonal scoring.
-// Returns a Quad in [0,1] fractions of the image — feed into pinVerts for proper perspective warp.
+// Find the 4 screen corners using percentile-based diagonal scoring.
+// Percentile (not extreme) avoids outliers like green keyboard reflections or table glow.
 function detectScreenCorners(img: HTMLImageElement, keyHex: string): Quad | null {
   const W=Math.min(img.naturalWidth,480), H=Math.min(img.naturalHeight,480);
   const c=document.createElement('canvas'); c.width=W; c.height=H;
   const ctx=c.getContext('2d')!; ctx.drawImage(img,0,0,W,H);
   const d=ctx.getImageData(0,0,W,H).data;
   const [kr,kg,kb]=hexToRgb(keyHex);
-  // TL=min(x+y), TR=max(x-y), BR=max(x+y), BL=min(x-y)
-  let tlS=Infinity,trS=-Infinity,brS=-Infinity,blS=Infinity;
-  let tlX=0,tlY=0,trX=0,trY=0,brX=0,brY=0,blX=0,blY=0,count=0;
+  // Collect all pixels that match the key — HIGH saturation threshold to exclude reflections
+  const pts:{x:number;y:number;s1:number;s2:number}[]=[];
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const i=(y*W+x)*4;
       const r=d[i]/255,g=d[i+1]/255,b=d[i+2]/255;
       const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
-      if(mx<0.06||mx-mn<mx*0.22) continue;
+      // Require high saturation (>40%) — excludes faint green reflections on keyboard/table
+      if(mx<0.10||mx-mn<mx*0.40) continue;
       const dist=Math.sqrt((r-kr)**2+(g-kg)**2+(b-kb)**2);
-      if(dist>0.40) continue;
-      count++;
-      const s1=x+y,s2=x-y;
-      if(s1<tlS){tlS=s1;tlX=x;tlY=y;}
-      if(s2>trS){trS=s2;trX=x;trY=y;}
-      if(s1>brS){brS=s1;brX=x;brY=y;}
-      if(s2<blS){blS=s2;blX=x;blY=y;}
+      if(dist>0.32) continue; // tight match — only actual green screen pixels
+      pts.push({x,y,s1:x+y,s2:x-y});
     }
   }
-  if(count<80){ console.warn('detectScreenCorners: only',count,'green pixels found — no corners'); return null; }
-  const q=[{x:tlX/W,y:tlY/H},{x:trX/W,y:trY/H},{x:brX/W,y:brY/H},{x:blX/W,y:blY/H}] as Quad;
-  console.log('Auto corners (%):', q.map(c=>`(${(c.x*100).toFixed(1)},${(c.y*100).toFixed(1)})`).join(' '));
+  if(pts.length<80){ console.warn('detectScreenCorners: only',pts.length,'px — no corners'); return null; }
+  // Use 3rd/97th percentile so a few stray pixels can't pull corners to wrong position
+  const P=0.03;
+  pts.sort((a,b)=>a.s1-b.s1); const tl=pts[Math.floor(pts.length*P)],  br=pts[Math.floor(pts.length*(1-P))];
+  pts.sort((a,b)=>b.s2-a.s2); const tr=pts[Math.floor(pts.length*P)],  bl=pts[Math.floor(pts.length*(1-P))];
+  const q=[{x:tl.x/W,y:tl.y/H},{x:tr.x/W,y:tr.y/H},{x:br.x/W,y:br.y/H},{x:bl.x/W,y:bl.y/H}] as Quad;
+  console.log('Auto corners (%):', q.map(p=>`(${(p.x*100).toFixed(1)},${(p.y*100).toFixed(1)})`).join(' '));
   return q;
 }
 
