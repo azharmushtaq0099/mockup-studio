@@ -60,7 +60,10 @@ void main() {
   float satGate = smoothstep(0.06, 0.22, sat); // <6% sat = fully preserve
 
   float rawAlpha = smoothstep(uThresh - uSoft, uThresh + uSoft, combined);
-  float alpha = mix(1.0, rawAlpha, satGate);
+  // Sharpen alpha: push partial-transparency pixels toward fully transparent
+  // Eliminates soft green fringe on screen edges without affecting opaque bezel/body
+  float sharpAlpha = rawAlpha * rawAlpha * (3.0 - 2.0 * rawAlpha);
+  float alpha = mix(1.0, sharpAlpha, satGate);
 
   // Luminance-preserving spill suppression (uSpill = user despill strength)
   float spill = (1.0 - rawAlpha) * satGate * uSpill;
@@ -780,8 +783,8 @@ export default function App(){
   const [native,    setNative]   = useState({w:840,h:520});
   const [pins,      setPins]     = useState<Quad>(()=>defaultCorners(840,520));
   const [keyColor,  setKeyColor] = useState('#00ff00');
-  const [keyThresh, setKeyThresh]= useState(0.38);
-  const [keySoft,   setKeySoft]  = useState(0.14);
+  const [keyThresh, setKeyThresh]= useState(0.44);
+  const [keySoft,   setKeySoft]  = useState(0.09);
   const [keySpill,  setKeySpill] = useState(0.90);
   const [grade,     setGrade]    = useState<GradeName>('natural');
   const [enhance,   setEnhance]  = useState<Enhance>(GRADES.natural);
@@ -855,8 +858,8 @@ export default function App(){
   const recNatRef   = useRef({w:1920,h:1080});
   const modeRef     = useRef<Mode>('manual');
   const keyClrRef   = useRef<[number,number,number]>([0,1,0]);
-  const keyTRef     = useRef(0.38);
-  const keySRef     = useRef(0.14);
+  const keyTRef     = useRef(0.44);
+  const keySRef     = useRef(0.09);
   const keySpillRef = useRef(0.90);
   const screenBoundsRef = useRef<{x0:number;y0:number;x1:number;y1:number}|null>(null);
   const enhRef      = useRef<Enhance>(GRADES.natural);
