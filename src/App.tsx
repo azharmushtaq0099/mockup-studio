@@ -320,6 +320,22 @@ function coverVerts(sw:number,sh:number,dw:number,dh:number): Float32Array {
   else if(sa<da){const m=(1-sa/da)/2;v0=m;v1=1-m;}
   return new Float32Array([-1,-1,u0,v0,1, 1,-1,u1,v0,1, -1,1,u0,v1,1, 1,-1,u1,v0,1, 1,1,u1,v1,1, -1,1,u0,v1,1]);
 }
+// Scale recording to cover detected screen bounds — prevents oversized recording in auto mode
+function boundsVerts(b:{x0:number;y0:number;x1:number;y1:number}, rW:number, rH:number, W:number, H:number): Float32Array {
+  const bW=(b.x1-b.x0)*W, bH=(b.y1-b.y0)*H;
+  const bAsp=bW/bH, rAsp=rW/rH;
+  let u0=0,u1=1,v0=0,v1=1;
+  if(rAsp>bAsp){const m=(1-bAsp/rAsp)/2;u0=m;u1=1-m;}
+  else if(rAsp<bAsp){const m=(1-rAsp/bAsp)/2;v0=m;v1=1-m;}
+  // NDC positions — x: 0→1 maps to -1→1; y: image-top(0)→NDC+1, image-bottom(1)→NDC-1
+  const nx0=b.x0*2-1, nx1=b.x1*2-1;
+  const nyT=1-b.y0*2, nyB=1-b.y1*2; // T=top of screen (higher NDC y), B=bottom
+  // v0=recording bottom at screen bottom, v1=recording top at screen top (FLIP_Y=true)
+  return new Float32Array([
+    nx0,nyB,u0,v0,1, nx1,nyB,u1,v0,1, nx0,nyT,u0,v1,1,
+    nx1,nyB,u1,v0,1, nx1,nyT,u1,v1,1, nx0,nyT,u0,v1,1,
+  ]);
+}
 function coverUVBounds(sw:number,sh:number,dw:number,dh:number):[number,number,number,number]{
   const sa=sw/sh,da=dw/dh; let u0=0,u1=1,v0=0,v1=1;
   if(sa>da){const m=(1-da/sa)/2;u0=m;u1=1-m;}
@@ -352,6 +368,32 @@ function pinVerts(pins: Quad, W: number, H: number, N=32): Float32Array | null {
 }
 
 // ─── Color utils ─────────────────────────────────────────────────────────────
+
+// Scan the whole mockup and return the bounding box of pixels that match the key color
+function detectScreenBounds(img: HTMLImageElement, keyHex: string): {x0:number;y0:number;x1:number;y1:number}|null {
+  const W=Math.min(img.naturalWidth,480), H=Math.min(img.naturalHeight,480);
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const ctx=c.getContext('2d')!; ctx.drawImage(img,0,0,W,H);
+  const d=ctx.getImageData(0,0,W,H).data;
+  const [kr,kg,kb]=hexToRgb(keyHex);
+  let minX=W,minY=H,maxX=0,maxY=0,count=0;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i=(y*W+x)*4;
+      const r=d[i]/255,g=d[i+1]/255,b=d[i+2]/255;
+      const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+      if(mx<0.06||mx-mn<mx*0.22) continue;
+      const dist=Math.sqrt((r-kr)**2+(g-kg)**2+(b-kb)**2);
+      if(dist<0.38){
+        if(x<minX)minX=x; if(x>maxX)maxX=x;
+        if(y<minY)minY=y; if(y>maxY)maxY=y;
+        count++;
+      }
+    }
+  }
+  if(count<80) return null;
+  return {x0:minX/W, y0:minY/H, x1:maxX/W, y1:maxY/H};
+}
 
 // Sample center 60% of mockup — avoids device frame; finer buckets + real average for accuracy
 function detectKeyColor(img: HTMLImageElement): string {
@@ -816,6 +858,7 @@ export default function App(){
   const keyTRef     = useRef(0.38);
   const keySRef     = useRef(0.14);
   const keySpillRef = useRef(0.90);
+  const screenBoundsRef = useRef<{x0:number;y0:number;x1:number;y1:number}|null>(null);
   const enhRef      = useRef<Enhance>(GRADES.natural);
   const trimInRef   = useRef(0);
   const trimOutRef  = useRef(1);
@@ -952,10 +995,15 @@ export default function App(){
           drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
         }
       } else {
+        // Auto (chroma key) mode
+        // Draw recording scaled to the detected screen bounds — not full canvas
         if(rReadyRef.current){
           if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
-          drawQuad(gl,plain,rt,coverVerts(rW,rH,W,H),{uEdge:0});
+          const sb=screenBoundsRef.current;
+          const rvt=sb ? boundsVerts(sb,rW,rH,W,H) : coverVerts(rW,rH,W,H);
+          drawQuad(gl,plain,rt,rvt,{uEdge:0,uOpacity:1});
         }
+        // Draw mockup on top — green screen becomes transparent
         if(mReadyRef.current){
           if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
           drawQuad(gl,chroma,mt,bgVerts(),{uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current});
@@ -1162,7 +1210,11 @@ export default function App(){
         const gl=glRef.current; if(!gl||!mTexRef.current) return;
         uploadTex(gl,mTexRef.current,img); mReadyRef.current=true;
         applyMockupSize(img.naturalWidth,img.naturalHeight);
-        if(modeRef.current==='auto') setKeyColor(detectKeyColor(img));
+        if(modeRef.current==='auto'){
+          const kc=detectKeyColor(img);
+          setKeyColor(kc);
+          screenBoundsRef.current=detectScreenBounds(img,kc);
+        }
       };
       img.src=src;
     }
@@ -1974,7 +2026,11 @@ export default function App(){
                     <button className="btn btn-ghost" style={{flex:1,fontSize:10.5,padding:5}} onClick={()=>{
                       if(!mockupSrc||mockupIsV) return;
                       const img=new Image();img.crossOrigin='anonymous';
-                      img.onload=()=>setKeyColor(detectKeyColor(img));img.src=mockupSrc;
+                      img.onload=()=>{
+                        const kc=detectKeyColor(img);
+                        setKeyColor(kc);
+                        screenBoundsRef.current=detectScreenBounds(img,kc);
+                      };img.src=mockupSrc;
                     }}>Auto-detect</button>
                   </div>
                   <Slider label="Threshold" min={0.05} max={0.8} step={0.01} value={keyThresh} onChange={setKeyThresh}/>
