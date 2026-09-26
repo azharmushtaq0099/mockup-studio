@@ -372,6 +372,38 @@ function pinVerts(pins: Quad, W: number, H: number, N=32): Float32Array | null {
 
 // ─── Color utils ─────────────────────────────────────────────────────────────
 
+// Find the 4 extreme corners of the green screen area using diagonal scoring.
+// Returns a Quad in [0,1] fractions of the image — feed into pinVerts for proper perspective warp.
+function detectScreenCorners(img: HTMLImageElement, keyHex: string): Quad | null {
+  const W=Math.min(img.naturalWidth,480), H=Math.min(img.naturalHeight,480);
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const ctx=c.getContext('2d')!; ctx.drawImage(img,0,0,W,H);
+  const d=ctx.getImageData(0,0,W,H).data;
+  const [kr,kg,kb]=hexToRgb(keyHex);
+  // TL=min(x+y), TR=max(x-y), BR=max(x+y), BL=min(x-y)
+  let tlS=Infinity,trS=-Infinity,brS=-Infinity,blS=Infinity;
+  let tlX=0,tlY=0,trX=0,trY=0,brX=0,brY=0,blX=0,blY=0,count=0;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i=(y*W+x)*4;
+      const r=d[i]/255,g=d[i+1]/255,b=d[i+2]/255;
+      const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+      if(mx<0.06||mx-mn<mx*0.22) continue;
+      const dist=Math.sqrt((r-kr)**2+(g-kg)**2+(b-kb)**2);
+      if(dist>0.40) continue;
+      count++;
+      const s1=x+y,s2=x-y;
+      if(s1<tlS){tlS=s1;tlX=x;tlY=y;}
+      if(s2>trS){trS=s2;trX=x;trY=y;}
+      if(s1>brS){brS=s1;brX=x;brY=y;}
+      if(s2<blS){blS=s2;blX=x;blY=y;}
+    }
+  }
+  if(count<80) return null;
+  // Return as fractions of detection canvas (= fractions of image, since canvas was rescaled uniformly)
+  return [{x:tlX/W,y:tlY/H},{x:trX/W,y:trY/H},{x:brX/W,y:brY/H},{x:blX/W,y:blY/H}] as Quad;
+}
+
 // Scan the whole mockup and return the bounding box of pixels that match the key color
 function detectScreenBounds(img: HTMLImageElement, keyHex: string): {x0:number;y0:number;x1:number;y1:number}|null {
   const W=Math.min(img.naturalWidth,480), H=Math.min(img.naturalHeight,480);
@@ -861,7 +893,8 @@ export default function App(){
   const keyTRef     = useRef(0.44);
   const keySRef     = useRef(0.09);
   const keySpillRef = useRef(0.90);
-  const screenBoundsRef = useRef<{x0:number;y0:number;x1:number;y1:number}|null>(null);
+  const screenBoundsRef  = useRef<{x0:number;y0:number;x1:number;y1:number}|null>(null);
+  const screenCornersRef = useRef<Quad|null>(null);
   const enhRef      = useRef<Enhance>(GRADES.natural);
   const trimInRef   = useRef(0);
   const trimOutRef  = useRef(1);
@@ -999,12 +1032,20 @@ export default function App(){
         }
       } else {
         // Auto (chroma key) mode
-        // Draw recording scaled to the detected screen bounds — not full canvas
         if(rReadyRef.current){
           if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
-          const sb=screenBoundsRef.current;
-          const rvt=sb ? boundsVerts(sb,rW,rH,W,H) : coverVerts(rW,rH,W,H);
-          drawQuad(gl,plain,rt,rvt,{uEdge:0,uOpacity:1});
+          // Primary: use detected corners → same perspective warp as manual mode
+          const ac=screenCornersRef.current;
+          if(ac){
+            const np=ac.map(c=>({x:c.x*W,y:c.y*H})) as Quad;
+            const vt=pinVerts(np,W,H);
+            if(vt) drawQuad(gl,plain,rt,vt,{uEdge:0,uOpacity:1});
+          } else {
+            // Fallback: flat rect from bounding box
+            const sb=screenBoundsRef.current;
+            const rvt=sb?boundsVerts(sb,rW,rH,W,H):coverVerts(rW,rH,W,H);
+            drawQuad(gl,plain,rt,rvt,{uEdge:0,uOpacity:1});
+          }
         }
         // Draw mockup on top — green screen becomes transparent
         if(mReadyRef.current){
@@ -1217,6 +1258,7 @@ export default function App(){
           const kc=detectKeyColor(img);
           setKeyColor(kc);
           screenBoundsRef.current=detectScreenBounds(img,kc);
+          screenCornersRef.current=detectScreenCorners(img,kc);
         }
       };
       img.src=src;
@@ -2033,6 +2075,7 @@ export default function App(){
                         const kc=detectKeyColor(img);
                         setKeyColor(kc);
                         screenBoundsRef.current=detectScreenBounds(img,kc);
+                        screenCornersRef.current=detectScreenCorners(img,kc);
                       };img.src=mockupSrc;
                     }}>Auto-detect</button>
                   </div>
