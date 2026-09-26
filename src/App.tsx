@@ -399,9 +399,10 @@ function detectScreenCorners(img: HTMLImageElement, keyHex: string): Quad | null
       if(s2<blS){blS=s2;blX=x;blY=y;}
     }
   }
-  if(count<80) return null;
-  // Return as fractions of detection canvas (= fractions of image, since canvas was rescaled uniformly)
-  return [{x:tlX/W,y:tlY/H},{x:trX/W,y:trY/H},{x:brX/W,y:brY/H},{x:blX/W,y:blY/H}] as Quad;
+  if(count<80){ console.warn('detectScreenCorners: only',count,'green pixels found — no corners'); return null; }
+  const q=[{x:tlX/W,y:tlY/H},{x:trX/W,y:trY/H},{x:brX/W,y:brY/H},{x:blX/W,y:blY/H}] as Quad;
+  console.log('Auto corners (%):', q.map(c=>`(${(c.x*100).toFixed(1)},${(c.y*100).toFixed(1)})`).join(' '));
+  return q;
 }
 
 // Scan the whole mockup and return the bounding box of pixels that match the key color
@@ -935,7 +936,20 @@ export default function App(){
   useEffect(()=>{pinsRef.current=pins},[pins]);
   useEffect(()=>{cszRef.current=csz},[csz]);
   useEffect(()=>{recNatRef.current=recNative},[recNative]);
-  useEffect(()=>{modeRef.current=mode},[mode]);
+  useEffect(()=>{
+    modeRef.current=mode;
+    // When switching to Auto with a static mockup already loaded, run detection now
+    if(mode==='auto' && mockupSrc && !mockupIsV && screenCornersRef.current===null){
+      const img=new Image(); img.crossOrigin='anonymous';
+      img.onload=()=>{
+        const kc=detectKeyColor(img);
+        setKeyColor(kc);
+        screenBoundsRef.current=detectScreenBounds(img,kc);
+        screenCornersRef.current=detectScreenCorners(img,kc);
+      };
+      img.src=mockupSrc;
+    }
+  },[mode]);
   useEffect(()=>{keyClrRef.current=hexToRgb(keyColor)},[keyColor]);
   useEffect(()=>{keyTRef.current=keyThresh},[keyThresh]);
   useEffect(()=>{keySRef.current=keySoft},[keySoft]);
@@ -1254,12 +1268,11 @@ export default function App(){
         const gl=glRef.current; if(!gl||!mTexRef.current) return;
         uploadTex(gl,mTexRef.current,img); mReadyRef.current=true;
         applyMockupSize(img.naturalWidth,img.naturalHeight);
-        if(modeRef.current==='auto'){
-          const kc=detectKeyColor(img);
-          setKeyColor(kc);
-          screenBoundsRef.current=detectScreenBounds(img,kc);
-          screenCornersRef.current=detectScreenCorners(img,kc);
-        }
+        // Always detect — corners needed whenever user switches to auto mode
+        const kc=detectKeyColor(img);
+        if(modeRef.current==='auto') setKeyColor(kc);
+        screenBoundsRef.current=detectScreenBounds(img,kc);
+        screenCornersRef.current=detectScreenCorners(img,kc);
       };
       img.src=src;
     }
