@@ -372,31 +372,39 @@ function pinVerts(pins: Quad, W: number, H: number, N=32): Float32Array | null {
 
 // ─── Color utils ─────────────────────────────────────────────────────────────
 
-// Find the 4 screen corners using percentile-based diagonal scoring.
-// Percentile (not extreme) avoids outliers like green keyboard reflections or table glow.
-function detectScreenCorners(img: HTMLImageElement, keyHex: string): Quad | null {
+// Simulate FRAG_CHROMA shader on CPU to find exactly which pixels get keyed out,
+// then find corners of that region. Corners match the shader output perfectly.
+function detectScreenCorners(img: HTMLImageElement, keyHex: string, thresh=0.44, soft=0.09): Quad | null {
   const W=Math.min(img.naturalWidth,480), H=Math.min(img.naturalHeight,480);
   const c=document.createElement('canvas'); c.width=W; c.height=H;
   const ctx=c.getContext('2d')!; ctx.drawImage(img,0,0,W,H);
   const d=ctx.getImageData(0,0,W,H).data;
   const [kr,kg,kb]=hexToRgb(keyHex);
-  // Collect all pixels that match the key — HIGH saturation threshold to exclude reflections
+  // CPU smoothstep
+  const sm=(e0:number,e1:number,x:number)=>{const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));return t*t*(3-2*t);};
   const pts:{x:number;y:number;s1:number;s2:number}[]=[];
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const i=(y*W+x)*4;
       const r=d[i]/255,g=d[i+1]/255,b=d[i+2]/255;
-      const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
-      // Require high saturation (>40%) — excludes faint green reflections on keyboard/table
-      if(mx<0.10||mx-mn<mx*0.40) continue;
+      // Mirror FRAG_CHROMA exactly
+      const cLen=Math.max(0.001,Math.sqrt(r*r+g*g+b*b));
+      const kLen=Math.max(0.001,Math.sqrt(kr*kr+kg*kg+kb*kb));
+      const cosA=(r*kr+g*kg+b*kb)/(cLen*kLen);
       const dist=Math.sqrt((r-kr)**2+(g-kg)**2+(b-kb)**2);
-      if(dist>0.32) continue; // tight match — only actual green screen pixels
-      pts.push({x,y,s1:x+y,s2:x-y});
+      const combined=dist*(1+Math.max(0,1-cosA)*0.5);
+      const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+      const sat=mx>0.001?(mx-mn)/mx:0;
+      const satGate=sm(0.06,0.22,sat);
+      const rawAlpha=sm(thresh-soft,thresh+soft,combined);
+      const sharpAlpha=rawAlpha*rawAlpha*(3-2*rawAlpha);
+      const alpha=(1-satGate)+sharpAlpha*satGate; // mix(1, sharpAlpha, satGate)
+      if(alpha<0.5) pts.push({x,y,s1:x+y,s2:x-y}); // pixel is keyed out
     }
   }
-  if(pts.length<80){ console.warn('detectScreenCorners: only',pts.length,'px — no corners'); return null; }
-  // Use 3rd/97th percentile so a few stray pixels can't pull corners to wrong position
-  const P=0.03;
+  if(pts.length<80){console.warn('detectScreenCorners: only',pts.length,'keyed px');return null;}
+  // 5th/95th percentile — robust against partial-transparent fringe pixels at screen edge
+  const P=0.05;
   pts.sort((a,b)=>a.s1-b.s1); const tl=pts[Math.floor(pts.length*P)],  br=pts[Math.floor(pts.length*(1-P))];
   pts.sort((a,b)=>b.s2-a.s2); const tr=pts[Math.floor(pts.length*P)],  bl=pts[Math.floor(pts.length*(1-P))];
   const q=[{x:tl.x/W,y:tl.y/H},{x:tr.x/W,y:tr.y/H},{x:br.x/W,y:br.y/H},{x:bl.x/W,y:bl.y/H}] as Quad;
@@ -944,7 +952,7 @@ export default function App(){
         const kc=detectKeyColor(img);
         setKeyColor(kc);
         screenBoundsRef.current=detectScreenBounds(img,kc);
-        screenCornersRef.current=detectScreenCorners(img,kc);
+        screenCornersRef.current=detectScreenCorners(img,kc,keyTRef.current,keySRef.current);
       };
       img.src=mockupSrc;
     }
@@ -1271,7 +1279,7 @@ export default function App(){
         const kc=detectKeyColor(img);
         if(modeRef.current==='auto') setKeyColor(kc);
         screenBoundsRef.current=detectScreenBounds(img,kc);
-        screenCornersRef.current=detectScreenCorners(img,kc);
+        screenCornersRef.current=detectScreenCorners(img,kc,keyTRef.current,keySRef.current);
       };
       img.src=src;
     }
@@ -2087,7 +2095,7 @@ export default function App(){
                         const kc=detectKeyColor(img);
                         setKeyColor(kc);
                         screenBoundsRef.current=detectScreenBounds(img,kc);
-                        screenCornersRef.current=detectScreenCorners(img,kc);
+                        screenCornersRef.current=detectScreenCorners(img,kc,keyTRef.current,keySRef.current);
                       };img.src=mockupSrc;
                     }}>Auto-detect</button>
                   </div>
