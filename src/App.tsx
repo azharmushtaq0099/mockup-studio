@@ -382,12 +382,11 @@ function detectScreenCorners(img: HTMLImageElement, keyHex: string, thresh=0.44,
   const [kr,kg,kb]=hexToRgb(keyHex);
   // CPU smoothstep
   const sm=(e0:number,e1:number,x:number)=>{const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));return t*t*(3-2*t);};
-  const pts:{x:number;y:number;s1:number;s2:number}[]=[];
+  const pts:{x:number;y:number}[]=[];
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const i=(y*W+x)*4;
       const r=d[i]/255,g=d[i+1]/255,b=d[i+2]/255;
-      // Mirror FRAG_CHROMA exactly
       const cLen=Math.max(0.001,Math.sqrt(r*r+g*g+b*b));
       const kLen=Math.max(0.001,Math.sqrt(kr*kr+kg*kg+kb*kb));
       const cosA=(r*kr+g*kg+b*kb)/(cLen*kLen);
@@ -398,16 +397,38 @@ function detectScreenCorners(img: HTMLImageElement, keyHex: string, thresh=0.44,
       const satGate=sm(0.06,0.22,sat);
       const rawAlpha=sm(thresh-soft,thresh+soft,combined);
       const sharpAlpha=rawAlpha*rawAlpha*(3-2*rawAlpha);
-      const alpha=(1-satGate)+sharpAlpha*satGate; // mix(1, sharpAlpha, satGate)
-      if(alpha<0.5) pts.push({x,y,s1:x+y,s2:x-y}); // pixel is keyed out
+      const alpha=(1-satGate)+sharpAlpha*satGate;
+      if(alpha<0.5) pts.push({x,y});
     }
   }
   if(pts.length<80){console.warn('detectScreenCorners: only',pts.length,'keyed px');return null;}
-  // 5th/95th percentile — robust against partial-transparent fringe pixels at screen edge
-  const P=0.05;
-  pts.sort((a,b)=>a.s1-b.s1); const tl=pts[Math.floor(pts.length*P)],  br=pts[Math.floor(pts.length*(1-P))];
-  pts.sort((a,b)=>b.s2-a.s2); const tr=pts[Math.floor(pts.length*P)],  bl=pts[Math.floor(pts.length*(1-P))];
-  const q=[{x:tl.x/W,y:tl.y/H},{x:tr.x/W,y:tr.y/H},{x:br.x/W,y:br.y/H},{x:bl.x/W,y:bl.y/H}] as Quad;
+
+  // Edge-based: split keyed pixels into top/bottom/left/right 5% edge bands,
+  // then derive each corner from the relevant two bands. More accurate than
+  // diagonal scoring for screens with rounded corners.
+  const P=Math.max(20,Math.floor(pts.length*0.05));
+  const byY=[...pts].sort((a,b)=>a.y-b.y);
+  const byX=[...pts].sort((a,b)=>a.x-b.x);
+  const topE=byY.slice(0,P),  botE=byY.slice(-P);
+  const lefE=byX.slice(0,P),  rigE=byX.slice(-P);
+
+  const tlx=topE.reduce((m,p)=>Math.min(m,p.x),Infinity);
+  const tly=lefE.reduce((m,p)=>Math.min(m,p.y),Infinity);
+  const trx=topE.reduce((m,p)=>Math.max(m,p.x),-Infinity);
+  const tryy=rigE.reduce((m,p)=>Math.min(m,p.y),Infinity);
+  const brx=botE.reduce((m,p)=>Math.max(m,p.x),-Infinity);
+  const bry=rigE.reduce((m,p)=>Math.max(m,p.y),-Infinity);
+  const blx=botE.reduce((m,p)=>Math.min(m,p.x),Infinity);
+  const bly=lefE.reduce((m,p)=>Math.max(m,p.y),-Infinity);
+
+  // Expand outward 2% to cover the rounded-corner gap between keyed pixels and actual screen edge
+  const px=W*0.02,py=H*0.02;
+  const q=[
+    {x:Math.max(0,(tlx-px)/W), y:Math.max(0,(tly-py)/H)},
+    {x:Math.min(1,(trx+px)/W), y:Math.max(0,(tryy-py)/H)},
+    {x:Math.min(1,(brx+px)/W), y:Math.min(1,(bry+py)/H)},
+    {x:Math.max(0,(blx-px)/W), y:Math.min(1,(bly+py)/H)},
+  ] as Quad;
   console.log('Auto corners (%):', q.map(p=>`(${(p.x*100).toFixed(1)},${(p.y*100).toFixed(1)})`).join(' '));
   return q;
 }
@@ -445,12 +466,14 @@ function detectKeyColor(img: HTMLImageElement): string {
   const ctx=c.getContext('2d')!; ctx.drawImage(img,0,0,W,H);
   const x0=Math.floor(W*0.2), y0=Math.floor(H*0.2), sw=Math.floor(W*0.6), sh=Math.floor(H*0.6);
   const d=ctx.getImageData(x0,y0,sw,sh).data;
-  // Fine 16-step quantization (2× finer than old 32-step = ±8 accuracy vs ±16)
   const hist: Record<string,{count:number;sr:number;sg:number;sb:number}>={};
   for(let i=0;i<d.length;i+=4){
     const r=d[i],g=d[i+1],b=d[i+2];
     const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
-    if(mx<55||mx>248||(mx-mn)/mx<0.28) continue; // filter dark/blown/grey
+    const mid=r+g+b-mx-mn; // second-highest channel
+    if(mx<55||mx>248) continue;
+    if((mx-mn)/mx<0.50) continue; // require high saturation — rejects skin tones (sat ~0.3)
+    if(mx<mid*1.3) continue; // require channel dominance — rejects muted/warm mixed colors
     const k=`${Math.round(r/16)},${Math.round(g/16)},${Math.round(b/16)}`;
     if(!hist[k]) hist[k]={count:0,sr:0,sg:0,sb:0};
     hist[k].count++; hist[k].sr+=r; hist[k].sg+=g; hist[k].sb+=b;
@@ -463,7 +486,6 @@ function detectKeyColor(img: HTMLImageElement): string {
   };
   const best=Object.values(hist).sort((a,b)=>score(b)-score(a))[0];
   if(!best) return '#00ff00';
-  // Return actual pixel average inside the bucket for sub-bucket precision
   const ar=Math.round(best.sr/best.count);
   const ag=Math.round(best.sg/best.count);
   const ab=Math.round(best.sb/best.count);
