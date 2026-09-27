@@ -100,6 +100,7 @@ uniform vec2 uQ0,uQ1,uQ2,uQ3;
 uniform float uLuma;
 uniform float uLumaSoft;
 uniform float uChroma;
+uniform vec3 uChromaKey;
 uniform vec4 uRecCrop;
 varying vec3 vUVW;
 float cx(vec2 a,vec2 b){return a.x*b.y-a.y*b.x;}
@@ -112,8 +113,12 @@ void main(){
   if(!inside){gl_FragColor=vec4(mock.rgb,1.0);return;}
   float t;
   if(uChroma>0.001){
-    float ge=mock.g-max(mock.r,mock.b);
-    t=smoothstep(max(0.0,uChroma-uLumaSoft),uChroma+uLumaSoft,ge);
+    float kLen=max(0.001,length(uChromaKey));
+    float cLen=max(0.001,length(mock.rgb));
+    float cosA=dot(mock.rgb/cLen,uChromaKey/kLen);
+    float dist=distance(mock.rgb,uChromaKey);
+    float combined=dist*(1.0+max(0.0,1.0-cosA)*0.5);
+    t=1.0-smoothstep(max(0.0,uChroma-uLumaSoft),uChroma+uLumaSoft,combined);
   } else {
     float lum=dot(mock.rgb,vec3(0.2126,0.7152,0.0722));
     t=1.0-smoothstep(max(0.0,uLuma-uLumaSoft),uLuma+uLumaSoft,lum);
@@ -520,7 +525,7 @@ type Mode='manual'|'auto';
 type ExportFmt='png'|'webm';
 type Quality='high'|'ultra';
 type ExportRatio='16:9'|'9:16'|'1:1';
-type TemplateItem={id:string;name:string;thumb:string;mockupData:string;pins:Quad;grade:GradeName;enhance:Enhance;ratio:ExportRatio;borderWidth:number;topBorder:boolean;edgeBlend:boolean;mockupOp:number;};
+type TemplateItem={id:string;name:string;thumb:string;mockupData:string;pins:Quad;grade:GradeName;enhance:Enhance;ratio:ExportRatio;borderWidth:number;borderRadius:number;topBorder:boolean;edgeBlend:boolean;mockupOp:number;};
 
 // ─── Library ─────────────────────────────────────────────────────────────────
 
@@ -877,8 +882,9 @@ export default function App(){
   const [zoom,      setZoom]     = useState(1.0);
   const [pan,       setPan]      = useState({x:0,y:0});
   const [edgeBlend,  setEdgeBlend]  = useState(true);
-  const [borderWidth,setBorderWidth]= useState(2);
-  const [topBorder,  setTopBorder]  = useState(false);
+  const [borderWidth,  setBorderWidth]  = useState(2);
+  const [borderRadius, setBorderRadius] = useState(0);
+  const [topBorder,    setTopBorder]    = useState(false);
   const [templates,  setTemplates]  = useState<TemplateItem[]>(()=>{try{return JSON.parse(localStorage.getItem('mockup_templates')||'[]');}catch{return [];}});
   const [selTpls,    setSelTpls]    = useState<Set<string>>(()=>new Set());
   const [tplBatchIdx,setTplBatchIdx]= useState<number|null>(null);
@@ -937,8 +943,9 @@ export default function App(){
   const chunksRef   = useRef<Blob[]>([]);
   const timerRef    = useRef<ReturnType<typeof setInterval>|null>(null);
   const edgeBlendRef   = useRef(true);
-  const borderWidthRef = useRef(2);
-  const topBorderRef   = useRef(false);
+  const borderWidthRef   = useRef(2);
+  const borderRadiusRef  = useRef(0);
+  const topBorderRef     = useRef(false);
   const mockupOpRef    = useRef(1.0);
   const lumaKeyRef   = useRef(0.0);
   const lumaSoftRef  = useRef(0.08);
@@ -994,6 +1001,7 @@ export default function App(){
   useEffect(()=>{panRef.current=pan},[pan]);
   useEffect(()=>{edgeBlendRef.current=edgeBlend},[edgeBlend]);
   useEffect(()=>{borderWidthRef.current=borderWidth},[borderWidth]);
+  useEffect(()=>{borderRadiusRef.current=borderRadius},[borderRadius]);
   useEffect(()=>{topBorderRef.current=topBorder},[topBorder]);
   useEffect(()=>{mockupOpRef.current=mockupOp},[mockupOp]);
   useEffect(()=>{lumaKeyRef.current=lumaKey},[lumaKey]);
@@ -1057,7 +1065,7 @@ export default function App(){
             // Single-pass blend: always opaque — no bleed possible
             const crop=coverUVBounds(rW,rH,W,H);
             drawQuad(gl,blendRef.current,mt,bgVerts(),
-              {...pinUV,uLuma:lk,uLumaSoft:ls,uChroma:ck,uRecCrop:crop},rt);
+              {...pinUV,uLuma:lk,uLumaSoft:ls,uChroma:ck,uChromaKey:keyClrRef.current,uRecCrop:crop},rt);
           } else {
             const vt=pinVerts(np,W,H);
             if(vt){
@@ -1169,31 +1177,51 @@ export default function App(){
             });
             ctx2d.restore();
           }
-          // Bezel border — left/bottom/right always, top optional (white)
+          // Bezel border — rounded or sharp corners, top optional (white)
           if(hasRecForBorder){
             const {w:dW2,h:dH2}=cszRef.current;
             const sx2=dW2>0?W/dW2:1,sy2=dH2>0?H/dH2:1;
             const np2=pinsRef.current.map(p=>({x:p.x*sx2,y:p.y*sy2}));
             // np2[0]=TL, np2[1]=TR, np2[2]=BR, np2[3]=BL
+            const TL=np2[0],TR=np2[1],BR=np2[2],BL=np2[3];
             const lw=Math.max(borderWidthRef.current,Math.round(borderWidthRef.current*scl));
+            const r=borderRadiusRef.current*scl;
+            // point at distance d from corner `c` toward neighbor `n`
+            const pe=(c:{x:number;y:number},n:{x:number;y:number},d:number)=>{
+              const dx=n.x-c.x,dy=n.y-c.y,len=Math.sqrt(dx*dx+dy*dy);
+              if(len<0.001)return c;
+              const t=Math.min(d,len*0.5)/len;
+              return{x:c.x+dx*t,y:c.y+dy*t};
+            };
             ctx2d.save();
             ctx2d.lineJoin='round';
-            // Left, bottom, right (dark)
             ctx2d.strokeStyle='rgba(0,0,0,0.92)';
             ctx2d.lineWidth=lw;
             ctx2d.beginPath();
-            ctx2d.moveTo(np2[0].x,np2[0].y);
-            ctx2d.lineTo(np2[3].x,np2[3].y);
-            ctx2d.lineTo(np2[2].x,np2[2].y);
-            ctx2d.lineTo(np2[1].x,np2[1].y);
+            if(r>0){
+              // Full perimeter with all 4 corners rounded (ideal for phones)
+              const a0=pe(TL,TR,r);
+              ctx2d.moveTo(a0.x,a0.y);
+              ctx2d.arcTo(TL.x,TL.y,BL.x,BL.y,r);
+              ctx2d.arcTo(BL.x,BL.y,BR.x,BR.y,r);
+              ctx2d.arcTo(BR.x,BR.y,TR.x,TR.y,r);
+              ctx2d.arcTo(TR.x,TR.y,TL.x,TL.y,r);
+              ctx2d.closePath();
+            } else {
+              // Sharp — left, bottom, right only
+              ctx2d.moveTo(TL.x,TL.y);
+              ctx2d.lineTo(BL.x,BL.y);
+              ctx2d.lineTo(BR.x,BR.y);
+              ctx2d.lineTo(TR.x,TR.y);
+            }
             ctx2d.stroke();
-            // Top edge (white, optional)
-            if(topBorderRef.current){
+            // Top edge (white, optional — sharp corners mode only)
+            if(topBorderRef.current&&r<=0){
               ctx2d.strokeStyle='rgba(255,255,255,0.90)';
               ctx2d.lineWidth=lw;
               ctx2d.beginPath();
-              ctx2d.moveTo(np2[0].x,np2[0].y);
-              ctx2d.lineTo(np2[1].x,np2[1].y);
+              ctx2d.moveTo(TL.x,TL.y);
+              ctx2d.lineTo(TR.x,TR.y);
               ctx2d.stroke();
             }
             ctx2d.restore();
@@ -1765,13 +1793,13 @@ export default function App(){
     try{
       const [mockupData,thumb]=await Promise.all([toBase64(mockupSrc,1280,0.82),toBase64(mockupSrc,200,0.70)]);
       const t:TemplateItem={id:Date.now().toString(),name,thumb,mockupData,pins:[...pins] as Quad,
-        grade,enhance,ratio:exportRatio as ExportRatio,borderWidth,topBorder,edgeBlend,mockupOp};
+        grade,enhance,ratio:exportRatio as ExportRatio,borderWidth,borderRadius,topBorder,edgeBlend,mockupOp};
       const updated=[...templates,t];
       setTemplates(updated);
       try{localStorage.setItem('mockup_templates',JSON.stringify(updated));}catch{showToast('Storage full — delete old templates',true);return;}
       showToast(`✓ Template "${name}" saved`);
     }catch{showToast('Failed to save template',true);}
-  },[mockupSrc,pins,grade,enhance,exportRatio,borderWidth,topBorder,edgeBlend,mockupOp,templates]);
+  },[mockupSrc,pins,grade,enhance,exportRatio,borderWidth,borderRadius,topBorder,edgeBlend,mockupOp,templates]);
 
   const deleteTemplate=useCallback((id:string)=>{
     const updated=templates.filter(t=>t.id!==id);
@@ -1799,6 +1827,7 @@ export default function App(){
       setGrade(t.grade); setEnhance(t.enhance); enhRef.current=t.enhance;
       setExportRatio(t.ratio); exportRatioRef.current=t.ratio;
       setBorderWidth(t.borderWidth); borderWidthRef.current=t.borderWidth;
+      setBorderRadius(t.borderRadius||0); borderRadiusRef.current=t.borderRadius||0;
       setTopBorder(t.topBorder); topBorderRef.current=t.topBorder;
       setEdgeBlend(t.edgeBlend); edgeBlendRef.current=t.edgeBlend;
       setMockupOp(t.mockupOp); mockupOpRef.current=t.mockupOp;
@@ -1951,9 +1980,30 @@ export default function App(){
                       <button key={w} className={`grade-btn${borderWidth===w?' active':''}`} onClick={()=>setBorderWidth(w)}>{w}px</button>
                     ))}
                   </div>
+
+                  <div className="sec-title" style={{marginBottom:5}}>Corner Radius</div>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                    <input type="range" min={0} max={60} step={1} value={borderRadius}
+                      onChange={e=>setBorderRadius(+e.target.value)} style={{flex:1}}/>
+                    <div style={{display:'flex',alignItems:'center',gap:3}}>
+                      <input type="number" min={0} max={60} step={1} value={borderRadius}
+                        onChange={e=>setBorderRadius(Math.max(0,Math.min(60,+e.target.value)))}
+                        style={{width:40,fontSize:11,padding:'2px 4px',textAlign:'center',
+                          background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',borderRadius:4}}/>
+                      <span style={{fontSize:10,color:'var(--muted)'}}>px</span>
+                    </div>
+                  </div>
+                  {borderRadius>0&&(
+                    <p style={{fontSize:9.5,color:'var(--muted)',lineHeight:1.5,marginBottom:8}}>
+                      Rounds all 4 corners — ideal for phones. Replaces left/bottom/right with a full closed border.
+                    </p>
+                  )}
+
                   <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
-                    <span style={{fontSize:11,color:'var(--muted)',flex:1}}>Top border</span>
-                    <button className={`grade-btn${topBorder?' active':''}`} onClick={()=>setTopBorder(v=>!v)}>
+                    <span style={{fontSize:11,color:'var(--muted)',flex:1}}>Top border {borderRadius>0?'(sharp mode only)':''}</span>
+                    <button className={`grade-btn${topBorder?' active':''}`}
+                      onClick={()=>setTopBorder(v=>!v)}
+                      style={{opacity:borderRadius>0?0.4:1}}>
                       {topBorder?'● White':'○ Off'}
                     </button>
                   </div>
@@ -1990,10 +2040,29 @@ export default function App(){
                   )}
                   {chromaKey>0&&(
                     <>
-                      <Slider label="Green Sensitivity" min={0.02} max={0.4} step={0.01} value={chromaKey} onChange={setChromaKey}/>
+                      <div style={{marginBottom:6}}>
+                        <div style={{fontSize:9,fontWeight:700,letterSpacing:'.8px',textTransform:'uppercase',color:'var(--muted)',marginBottom:5}}>Screen Color — pick manually</div>
+                        <div style={{display:'flex',alignItems:'center',gap:8}}>
+                          <div style={{position:'relative',flexShrink:0}}>
+                            <div style={{width:36,height:36,borderRadius:6,background:keyColor,border:'2px solid var(--border)',cursor:'pointer'}}
+                              onClick={()=>document.getElementById('manual-chroma-pick')?.click()}/>
+                            <input id="manual-chroma-pick" type="color" value={keyColor}
+                              onChange={e=>setKeyColor(e.target.value)}
+                              style={{position:'absolute',opacity:0,width:0,height:0,pointerEvents:'none'}}/>
+                          </div>
+                          <div style={{flex:1}}>
+                            <input value={keyColor} onChange={e=>{if(/^#[0-9a-fA-F]{6}$/.test(e.target.value))setKeyColor(e.target.value);}}
+                              style={{width:'100%',fontSize:11,padding:'4px 6px',
+                                background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',
+                                borderRadius:4,fontFamily:'monospace',letterSpacing:'.05em',boxSizing:'border-box' as const}}/>
+                            <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>Click swatch or type hex value</div>
+                          </div>
+                        </div>
+                      </div>
+                      <Slider label="Key Threshold" min={0.02} max={0.5} step={0.01} value={chromaKey} onChange={setChromaKey}/>
                       <Slider label="Softness" min={0.01} max={0.2} step={0.01} value={lumaSoft} onChange={setLumaSoft}/>
                       <p style={{fontSize:10,color:'var(--muted)',lineHeight:1.5,marginTop:5}}>
-                        Use a solid green on the laptop screen. Raise until the green area disappears cleanly.
+                        Pick the exact screen colour. Raise threshold until screen clears — stop before the device body bleeds through.
                       </p>
                     </>
                   )}
@@ -2131,10 +2200,30 @@ export default function App(){
 
               {mode==='auto'&&(
                 <div className="sec">
-                  <div className="sec-title">Chroma Key</div>
-                  <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:8}}>
-                    <input type="color" value={keyColor} onChange={e=>setKeyColor(e.target.value)}/>
-                    <button className="btn btn-ghost" style={{flex:1,fontSize:10.5,padding:5}} onClick={()=>{
+                  <div className="sec-title">Chroma Key — Screen Color</div>
+                  <div style={{marginBottom:10}}>
+                    <div style={{fontSize:9,fontWeight:700,letterSpacing:'.8px',textTransform:'uppercase',color:'var(--muted)',marginBottom:5}}>
+                      Manual setup — pick screen color
+                    </div>
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+                      <div style={{position:'relative',flexShrink:0}}>
+                        <div style={{width:40,height:40,borderRadius:7,background:keyColor,
+                          border:'2px solid var(--border)',cursor:'pointer',boxShadow:'0 2px 8px rgba(0,0,0,.3)'}}
+                          onClick={()=>document.getElementById('auto-chroma-pick')?.click()}/>
+                        <input id="auto-chroma-pick" type="color" value={keyColor}
+                          onChange={e=>setKeyColor(e.target.value)}
+                          style={{position:'absolute',opacity:0,width:0,height:0,pointerEvents:'none'}}/>
+                      </div>
+                      <div style={{flex:1}}>
+                        <input value={keyColor} onChange={e=>{if(/^#[0-9a-fA-F]{6}$/.test(e.target.value))setKeyColor(e.target.value);}}
+                          style={{width:'100%',fontSize:12,padding:'5px 8px',
+                            background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',
+                            borderRadius:5,fontFamily:'monospace',letterSpacing:'.08em',
+                            boxSizing:'border-box' as const,marginBottom:3}}/>
+                        <div style={{fontSize:9,color:'var(--muted)'}}>Click swatch or type hex</div>
+                      </div>
+                    </div>
+                    <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:10.5,padding:'5px 0'}} onClick={()=>{
                       if(!mockupSrc||mockupIsV) return;
                       const img=new Image();img.crossOrigin='anonymous';
                       img.onload=()=>{
@@ -2143,7 +2232,7 @@ export default function App(){
                         screenBoundsRef.current=detectScreenBounds(img,kc);
                         screenCornersRef.current=detectScreenCorners(img,kc);
                       };img.src=mockupSrc;
-                    }}>Auto-detect</button>
+                    }}>⚡ Auto-detect from mockup</button>
                   </div>
                   <Slider label="Threshold" min={0.05} max={0.8} step={0.01} value={keyThresh} onChange={setKeyThresh}/>
                   <Slider label="Softness"  min={0.01} max={0.4} step={0.01} value={keySoft}   onChange={setKeySoft}/>
