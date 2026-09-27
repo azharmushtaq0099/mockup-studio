@@ -1095,11 +1095,12 @@ export default function App(){
             }
           }
         } else {
-          // Corners not yet detected — fall back to chroma key with bounds (not coverVerts)
+          // Corners not detected yet — recording under mockup+chroma key (coverVerts last resort)
           if(rReadyRef.current){
             if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
             const sb=screenBoundsRef.current;
-            if(sb) drawQuad(gl,plain,rt,boundsVerts(sb,rW,rH,W,H),{uEdge:0,uOpacity:1});
+            const rvt=sb?boundsVerts(sb,rW,rH,W,H):coverVerts(rW,rH,W,H);
+            drawQuad(gl,plain,rt,rvt,{uEdge:0,uOpacity:1});
           }
           if(mReadyRef.current){
             if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
