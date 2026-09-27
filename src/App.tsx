@@ -472,8 +472,8 @@ function detectKeyColor(img: HTMLImageElement): string {
     const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
     const mid=r+g+b-mx-mn; // second-highest channel
     if(mx<55||mx>248) continue;
-    if((mx-mn)/mx<0.50) continue; // require high saturation — rejects skin tones (sat ~0.3)
-    if(mx<mid*1.3) continue; // require channel dominance — rejects muted/warm mixed colors
+    if((mx-mn)/mx<0.35) continue; // require meaningful saturation — rejects greys and most skin
+    if(mx<mid*1.35) continue; // require clear channel dominance — rejects warm mixed colors like skin
     const k=`${Math.round(r/16)},${Math.round(g/16)},${Math.round(b/16)}`;
     if(!hist[k]) hist[k]={count:0,sr:0,sg:0,sb:0};
     hist[k].count++; hist[k].sr+=r; hist[k].sg+=g; hist[k].sb+=b;
@@ -1074,26 +1074,37 @@ export default function App(){
           drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
         }
       } else {
-        // Auto (chroma key) mode
-        if(rReadyRef.current){
-          if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
-          // Primary: use detected corners → same perspective warp as manual mode
-          const ac=screenCornersRef.current;
-          if(ac){
+        // Auto mode: SAME pipeline as manual — mockup first, recording on top via pinVerts.
+        // No chroma key on mockup; recording covers the green screen directly.
+        const ac=screenCornersRef.current;
+        if(ac){
+          // Mockup first (plain — green screen stays opaque, recording will cover it)
+          if(mReadyRef.current){
+            if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
+            drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:1});
+          }
+          // Recording on top at auto-detected corners — identical to manual pinning
+          if(rReadyRef.current){
+            if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
             const np=ac.map(c=>({x:c.x*W,y:c.y*H})) as Quad;
             const vt=pinVerts(np,W,H);
-            if(vt) drawQuad(gl,plain,rt,vt,{uEdge:0,uOpacity:1});
-          } else {
-            // Fallback: flat rect from bounding box
-            const sb=screenBoundsRef.current;
-            const rvt=sb?boundsVerts(sb,rW,rH,W,H):coverVerts(rW,rH,W,H);
-            drawQuad(gl,plain,rt,rvt,{uEdge:0,uOpacity:1});
+            if(vt){
+              const srec=screenRecRef.current||plain;
+              drawQuad(gl,srec,rt,vt,{uEdge:0});
+              if(screenFxRef.current) drawQuad(gl,screenFxRef.current,rt,vt,{});
+            }
           }
-        }
-        // Draw mockup on top — green screen becomes transparent
-        if(mReadyRef.current){
-          if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
-          drawQuad(gl,chroma,mt,bgVerts(),{uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current});
+        } else {
+          // Corners not yet detected — fall back to chroma key with bounds (not coverVerts)
+          if(rReadyRef.current){
+            if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
+            const sb=screenBoundsRef.current;
+            if(sb) drawQuad(gl,plain,rt,boundsVerts(sb,rW,rH,W,H),{uEdge:0,uOpacity:1});
+          }
+          if(mReadyRef.current){
+            if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
+            drawQuad(gl,chroma,mt,bgVerts(),{uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current});
+          }
         }
       }
 
