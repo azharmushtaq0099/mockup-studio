@@ -1078,28 +1078,36 @@ export default function App(){
           drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
         }
       } else {
-        // Auto mode: SAME pipeline as manual — mockup first, recording on top via pinVerts.
-        // No chroma key on mockup; recording covers the green screen directly.
+        // AUTO mode: recording first at detected corners, then mockup WITH chroma key on top.
+        // The chroma key is the authoritative screen boundary — it removes only the green
+        // screen area, so recording can ONLY show through the actual screen. Any corner
+        // detection inaccuracy (over/undershoot) is automatically corrected by the mask.
         const ac=screenCornersRef.current;
+        const cUni={uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current};
         if(ac){
-          // Mockup first (plain — green screen stays opaque, recording will cover it)
-          if(mReadyRef.current){
-            if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
-            drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:1});
-          }
-          // Recording on top at auto-detected corners — identical to manual pinning
+          // Step 1 — recording placed at detected corners (fills the screen area)
           if(rReadyRef.current){
             if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
-            const np=ac.map(c=>({x:c.x*W,y:c.y*H})) as Quad;
+            const np=ac.map(p=>({x:p.x*W,y:p.y*H})) as Quad;
             const vt=pinVerts(np,W,H);
             if(vt){
-              const srec=screenRecRef.current||plain;
-              drawQuad(gl,srec,rt,vt,{uEdge:0});
-              if(screenFxRef.current) drawQuad(gl,screenFxRef.current,rt,vt,{});
+              drawQuad(gl,screenRecRef.current||plain,rt,vt,{uEdge:0});
             }
           }
+          // Step 2 — mockup with chroma key: green screen→transparent (recording shows),
+          // bezel/background→opaque (recording hidden). Perfect mask, no bleed possible.
+          if(mReadyRef.current){
+            if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
+            drawQuad(gl,chroma,mt,bgVerts(),cUni);
+          }
+          // Step 3 — glass surface FX on top of the composited screen
+          if(rReadyRef.current&&screenFxRef.current){
+            const np=ac.map(p=>({x:p.x*W,y:p.y*H})) as Quad;
+            const vt=pinVerts(np,W,H);
+            if(vt) drawQuad(gl,screenFxRef.current,rt,vt,{});
+          }
         } else {
-          // Corners not detected yet — recording under mockup+chroma key (coverVerts last resort)
+          // Corners not detected — recording at bounding-box under chroma key (same mask logic)
           if(rReadyRef.current){
             if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
             const sb=screenBoundsRef.current;
@@ -1108,7 +1116,7 @@ export default function App(){
           }
           if(mReadyRef.current){
             if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
-            drawQuad(gl,chroma,mt,bgVerts(),{uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current});
+            drawQuad(gl,chroma,mt,bgVerts(),cUni);
           }
         }
       }
