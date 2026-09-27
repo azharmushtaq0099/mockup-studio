@@ -372,62 +372,66 @@ function pinVerts(pins: Quad, W: number, H: number, N=32): Float32Array | null {
 
 // ─── Color utils ─────────────────────────────────────────────────────────────
 
-// Simulate FRAG_CHROMA shader on CPU to find exactly which pixels get keyed out,
-// then find corners of that region. Corners match the shader output perfectly.
-function detectScreenCorners(img: HTMLImageElement, keyHex: string, thresh=0.44, soft=0.09): Quad | null {
+// Find green-screen corners using three independent detection methods so any real
+// screen is caught even when detectKeyColor returns a slightly wrong shade.
+// Returns bounding-box quad [TL,TR,BR,BL] as 0-1 fractions, or null.
+function detectScreenCorners(img: HTMLImageElement, keyHex: string): Quad | null {
   const W=Math.min(img.naturalWidth,480), H=Math.min(img.naturalHeight,480);
   const c=document.createElement('canvas'); c.width=W; c.height=H;
   const ctx=c.getContext('2d')!; ctx.drawImage(img,0,0,W,H);
   const d=ctx.getImageData(0,0,W,H).data;
   const [kr,kg,kb]=hexToRgb(keyHex);
-  // CPU smoothstep
+  // Dominant channel of the detected key color
+  const keyDom=kr>=kg&&kr>=kb?0:kg>=kb?1:2;
   const sm=(e0:number,e1:number,x:number)=>{const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));return t*t*(3-2*t);};
   const pts:{x:number;y:number}[]=[];
+  // Fixed generous thresholds — never use user's render sliders for spatial detection
+  const T=0.50, S=0.10;
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const i=(y*W+x)*4;
       const r=d[i]/255,g=d[i+1]/255,b=d[i+2]/255;
+      const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+      const sat=mx>0.001?(mx-mn)/mx:0;
+      // Method A: shader-sim with generous fixed thresholds
       const cLen=Math.max(0.001,Math.sqrt(r*r+g*g+b*b));
       const kLen=Math.max(0.001,Math.sqrt(kr*kr+kg*kg+kb*kb));
       const cosA=(r*kr+g*kg+b*kb)/(cLen*kLen);
       const dist=Math.sqrt((r-kr)**2+(g-kg)**2+(b-kb)**2);
       const combined=dist*(1+Math.max(0,1-cosA)*0.5);
-      const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
-      const sat=mx>0.001?(mx-mn)/mx:0;
       const satGate=sm(0.06,0.22,sat);
-      const rawAlpha=sm(thresh-soft,thresh+soft,combined);
-      const sharpAlpha=rawAlpha*rawAlpha*(3-2*rawAlpha);
-      const alpha=(1-satGate)+sharpAlpha*satGate;
-      if(alpha<0.5) pts.push({x,y});
+      const rawA=sm(T-S,T+S,combined);
+      const alphaA=(1-satGate)+rawA*rawA*(3-2*rawA)*satGate;
+      // Method B: raw distance — catches when detected key color is slightly off
+      const isB=dist<0.52;
+      // Method C: dominant-channel check — works even if key color is entirely wrong shade
+      const ch=[r,g,b];
+      const domVal=ch[keyDom];
+      const oth1=ch[(keyDom+1)%3], oth2=ch[(keyDom+2)%3];
+      const otherMax=Math.max(oth1,oth2);
+      const isC=domVal>0.18&&domVal>otherMax*1.22&&sat>0.18;
+      if(alphaA<0.5||isB||isC) pts.push({x,y});
     }
   }
-  if(pts.length<80){console.warn('detectScreenCorners: only',pts.length,'keyed px');return null;}
-
-  // Edge-based: split keyed pixels into top/bottom/left/right 5% edge bands,
-  // then derive each corner from the relevant two bands. More accurate than
-  // diagonal scoring for screens with rounded corners.
-  const P=Math.max(20,Math.floor(pts.length*0.05));
-  const byY=[...pts].sort((a,b)=>a.y-b.y);
-  const byX=[...pts].sort((a,b)=>a.x-b.x);
-  const topE=byY.slice(0,P),  botE=byY.slice(-P);
-  const lefE=byX.slice(0,P),  rigE=byX.slice(-P);
-
-  const tlx=topE.reduce((m,p)=>Math.min(m,p.x),Infinity);
-  const tly=lefE.reduce((m,p)=>Math.min(m,p.y),Infinity);
-  const trx=topE.reduce((m,p)=>Math.max(m,p.x),-Infinity);
-  const tryy=rigE.reduce((m,p)=>Math.min(m,p.y),Infinity);
-  const brx=botE.reduce((m,p)=>Math.max(m,p.x),-Infinity);
-  const bry=rigE.reduce((m,p)=>Math.max(m,p.y),-Infinity);
-  const blx=botE.reduce((m,p)=>Math.min(m,p.x),Infinity);
-  const bly=lefE.reduce((m,p)=>Math.max(m,p.y),-Infinity);
-
-  // Expand outward 2% to cover the rounded-corner gap between keyed pixels and actual screen edge
-  const px=W*0.02,py=H*0.02;
+  if(pts.length<100){console.warn('detectScreenCorners: only',pts.length,'matched px');return null;}
+  // Percentile 2–98: removes stray outlier pixels before computing bounds
+  const xs=pts.map(p=>p.x).sort((a,b)=>a-b);
+  const ys=pts.map(p=>p.y).sort((a,b)=>a-b);
+  const lo=Math.max(0,Math.floor(pts.length*0.02));
+  const hi=Math.min(pts.length-1,Math.ceil(pts.length*0.98)-1);
+  const x0=xs[lo],x1=xs[hi],y0=ys[lo],y1=ys[hi];
+  // Reject if bounds span >90% of canvas in both dims — almost certainly noise/background
+  if((x1-x0)/W>0.90&&(y1-y0)/H>0.90){
+    console.warn('detectScreenCorners: matched region too large, discarding');
+    return null;
+  }
+  // 1.5% outward expansion to cover anti-aliased / rounded screen corners
+  const padX=W*0.015,padY=H*0.015;
   const q=[
-    {x:Math.max(0,(tlx-px)/W), y:Math.max(0,(tly-py)/H)},
-    {x:Math.min(1,(trx+px)/W), y:Math.max(0,(tryy-py)/H)},
-    {x:Math.min(1,(brx+px)/W), y:Math.min(1,(bry+py)/H)},
-    {x:Math.max(0,(blx-px)/W), y:Math.min(1,(bly+py)/H)},
+    {x:Math.max(0,(x0-padX)/W), y:Math.max(0,(y0-padY)/H)},
+    {x:Math.min(1,(x1+padX)/W), y:Math.max(0,(y0-padY)/H)},
+    {x:Math.min(1,(x1+padX)/W), y:Math.min(1,(y1+padY)/H)},
+    {x:Math.max(0,(x0-padX)/W), y:Math.min(1,(y1+padY)/H)},
   ] as Quad;
   console.log('Auto corners (%):', q.map(p=>`(${(p.x*100).toFixed(1)},${(p.y*100).toFixed(1)})`).join(' '));
   return q;
@@ -974,7 +978,7 @@ export default function App(){
         const kc=detectKeyColor(img);
         setKeyColor(kc);
         screenBoundsRef.current=detectScreenBounds(img,kc);
-        screenCornersRef.current=detectScreenCorners(img,kc,keyTRef.current,keySRef.current);
+        screenCornersRef.current=detectScreenCorners(img,kc);
       };
       img.src=mockupSrc;
     }
@@ -1313,7 +1317,7 @@ export default function App(){
         const kc=detectKeyColor(img);
         if(modeRef.current==='auto') setKeyColor(kc);
         screenBoundsRef.current=detectScreenBounds(img,kc);
-        screenCornersRef.current=detectScreenCorners(img,kc,keyTRef.current,keySRef.current);
+        screenCornersRef.current=detectScreenCorners(img,kc);
       };
       img.src=src;
     }
@@ -2129,7 +2133,7 @@ export default function App(){
                         const kc=detectKeyColor(img);
                         setKeyColor(kc);
                         screenBoundsRef.current=detectScreenBounds(img,kc);
-                        screenCornersRef.current=detectScreenCorners(img,kc,keyTRef.current,keySRef.current);
+                        screenCornersRef.current=detectScreenCorners(img,kc);
                       };img.src=mockupSrc;
                     }}>Auto-detect</button>
                   </div>
