@@ -150,14 +150,34 @@ void main(){
 `;
 
 // Screen recording layer: cool color-temp shift + micro contrast
-// Edge feather still user-controlled via uEdge (same as FRAG_PLAIN)
+// Supports optional rounded-corner clipping (uRx/uRy) and camera-hole punch (uCamPos/uCamR/uCamAsp)
 const FRAG_SCREEN_REC = `
 precision mediump float;
 uniform sampler2D uTex;
 uniform float uEdge;
+uniform float uRx;
+uniform float uRy;
+uniform vec2  uCamPos;
+uniform float uCamR;
+uniform float uCamAsp;
 varying vec3 vUVW;
 void main() {
   vec2 uv = vUVW.xy / vUVW.z;
+
+  // Rounded corner clipping — discard pixels in corner boxes outside the arc
+  if(uRx > 0.0 && uRy > 0.0) {
+    float cx = uv.x < uRx ? (uRx - uv.x)/uRx : uv.x > 1.0-uRx ? (uv.x - (1.0-uRx))/uRx : 0.0;
+    float cy = uv.y < uRy ? (uRy - uv.y)/uRy : uv.y > 1.0-uRy ? (uv.y - (1.0-uRy))/uRy : 0.0;
+    if(cx > 0.0 && cy > 0.0 && cx*cx + cy*cy > 1.0) discard;
+  }
+
+  // Camera-hole punch — circular cutout for punch-hole / notch cameras
+  if(uCamR > 0.001) {
+    vec2 d = uv - uCamPos;
+    d.y *= uCamAsp;
+    if(dot(d,d) < uCamR*uCamR) discard;
+  }
+
   vec4 c = texture2D(uTex, uv);
   c.rgb = (c.rgb - 0.5) * 1.05 + 0.5;
   c.r -= 0.008; c.b += 0.010;
@@ -892,6 +912,11 @@ export default function App(){
   const [lumaKey,    setLumaKey]    = useState(0.0);
   const [lumaSoft,   setLumaSoft]   = useState(0.08);
   const [chromaKey,  setChromaKey]  = useState(0.0);
+  const [punchThrough, setPunchThrough] = useState(false);
+  const [camHole,    setCamHole]    = useState(false);
+  const [camX,       setCamX]       = useState(0.50);
+  const [camY,       setCamY]       = useState(0.04);
+  const [camRadius,  setCamRadius]  = useState(22);
   const [textItems,  setTextItems]  = useState<TextItem[]>([]);
   const [selTextId,  setSelTextId]  = useState<string|null>(null);
   const [audioSrc,   setAudioSrc]   = useState<string|null>(null);
@@ -949,8 +974,13 @@ export default function App(){
   const mockupOpRef    = useRef(1.0);
   const lumaKeyRef   = useRef(0.0);
   const lumaSoftRef  = useRef(0.08);
-  const chromaKeyRef  = useRef(0.0);
-  const textItemsRef  = useRef<TextItem[]>([]);
+  const chromaKeyRef    = useRef(0.0);
+  const punchThroughRef = useRef(false);
+  const camHoleRef      = useRef(false);
+  const camXRef         = useRef(0.50);
+  const camYRef         = useRef(0.04);
+  const camRadiusRef    = useRef(22);
+  const textItemsRef    = useRef<TextItem[]>([]);
   const textDragRef   = useRef<{id:string;sx:number;sy:number;ox:number;oy:number}|null>(null);
   const textCanvasRef = useRef<HTMLCanvasElement|null>(null);
   const textTexRef    = useRef<WebGLTexture|null>(null);
@@ -1007,6 +1037,11 @@ export default function App(){
   useEffect(()=>{lumaKeyRef.current=lumaKey},[lumaKey]);
   useEffect(()=>{lumaSoftRef.current=lumaSoft},[lumaSoft]);
   useEffect(()=>{chromaKeyRef.current=chromaKey},[chromaKey]);
+  useEffect(()=>{punchThroughRef.current=punchThrough},[punchThrough]);
+  useEffect(()=>{camHoleRef.current=camHole},[camHole]);
+  useEffect(()=>{camXRef.current=camX},[camX]);
+  useEffect(()=>{camYRef.current=camY},[camY]);
+  useEffect(()=>{camRadiusRef.current=camRadius},[camRadius]);
   useEffect(()=>{textItemsRef.current=textItems},[textItems]);
   useEffect(()=>{audioVolRef.current=audioVol; if(audioElRef.current) audioElRef.current.volume=audioVol;},[audioVol]);
   useEffect(()=>{ exportRatioRef.current=exportRatio; },[exportRatio]);
@@ -1061,22 +1096,43 @@ export default function App(){
             uQ2:[np[2].x/W,1-np[2].y/H] as [number,number],
             uQ3:[np[3].x/W,1-np[3].y/H] as [number,number],
           };
-          if((lk>0.001||ck>0.001) && mReadyRef.current && blendRef.current){
-            // Single-pass blend: always opaque — no bleed possible
+          // Corner-rounding + camera-hole uniforms for FRAG_SCREEN_REC
+          const qW=Math.sqrt((np[1].x-np[0].x)**2+(np[1].y-np[0].y)**2)||1;
+          const qH=Math.sqrt((np[3].x-np[0].x)**2+(np[3].y-np[0].y)**2)||1;
+          const rr=borderRadiusRef.current*(W/Math.max(1,cszRef.current.w||W));
+          const uRx=rr/qW, uRy=rr/qH;
+          const uCamAsp=qW/qH;
+          const uCamR=camHoleRef.current?camRadiusRef.current*(W/Math.max(1,cszRef.current.w||W))/qW:0;
+          const uCamPos:[number,number]=[camXRef.current,camYRef.current];
+          const srecUni={uEdge:ue,uRx,uRy,uCamPos,uCamR,uCamAsp};
+
+          if(punchThroughRef.current && cutoutRef.current){
+            // Punch-through: recording below, mockup screen cut out on top → hand stays in front
+            const vt=pinVerts(np,W,H);
+            if(vt){
+              const srec=screenRecRef.current||plain;
+              drawQuad(gl,srec,rt,vt,srecUni);
+              if(mReadyRef.current){
+                drawQuad(gl,cutoutRef.current,mt,bgVerts(),{...pinUV,uOpacity:mop});
+              }
+              if(screenFxRef.current) drawQuad(gl,screenFxRef.current,rt,vt,{});
+            } else if(mReadyRef.current){
+              drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
+            }
+          } else if((lk>0.001||ck>0.001) && mReadyRef.current && blendRef.current){
+            // Luma/chroma blend: single-pass, always opaque — no bleed possible
             const crop=coverUVBounds(rW,rH,W,H);
             drawQuad(gl,blendRef.current,mt,bgVerts(),
               {...pinUV,uLuma:lk,uLumaSoft:ls,uChroma:ck,uChromaKey:keyClrRef.current,uRecCrop:crop},rt);
           } else {
             const vt=pinVerts(np,W,H);
             if(vt){
-              // Mockup first (full), then recording on top with soft feather — seamless embed
+              // Mockup first (full), then recording on top
               if(mReadyRef.current){
                 drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
               }
-              // Recording with screen color grade (edge feather still user-controlled)
               const srec=screenRecRef.current||plain;
-              drawQuad(gl,srec,rt,vt,{uEdge:ue});
-              // Glass surface overlay: glare streak + corner vignette + scanlines
+              drawQuad(gl,srec,rt,vt,srecUni);
               if(screenFxRef.current) drawQuad(gl,screenFxRef.current,rt,vt,{});
             } else if(mReadyRef.current){
               drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
@@ -2014,33 +2070,46 @@ export default function App(){
                       onClick={()=>setMockupOp(1.0)}>Restore full opacity</button>
                   )}
 
-                  <div className="sec-title" style={{marginTop:12,marginBottom:5}}>Hand in Front</div>
+                  <div className="sec-title" style={{marginTop:12,marginBottom:5}}>Recording Behind Hand</div>
                   <p style={{fontSize:10.5,color:'var(--muted)',lineHeight:1.6,marginBottom:8}}>
-                    Hand overlapping the screen? Pick your screen type, adjust pins to the screen corners, then raise the key value.
+                    Hand visible in your mockup? Choose how to keep it in front of the recording.
                   </p>
 
-                  <div className="sec-title" style={{marginBottom:4,fontSize:9.5}}>SCREEN TYPE</div>
-                  <div className="grade-row" style={{marginBottom:10}}>
-                    <button className={`grade-btn${chromaKey<=0&&lumaKey<=0?' active':''}`}
-                      onClick={()=>{setLumaKey(0);setChromaKey(0);}}>Off</button>
-                    <button className={`grade-btn${lumaKey>0&&chromaKey<=0?' active':''}`}
-                      onClick={()=>{setLumaKey(0.08);setChromaKey(0);}}>Dark Screen</button>
-                    <button className={`grade-btn${chromaKey>0?' active':''}`}
-                      onClick={()=>{setChromaKey(0.12);setLumaKey(0);}}>Green Screen</button>
+                  <div className="sec-title" style={{marginBottom:4,fontSize:9.5}}>METHOD</div>
+                  <div className="grade-row" style={{marginBottom:4,flexWrap:'wrap' as const,gap:4}}>
+                    <button className={`grade-btn${!punchThrough&&chromaKey<=0&&lumaKey<=0?' active':''}`}
+                      style={{flex:'1 1 auto',fontSize:10}}
+                      onClick={()=>{setPunchThrough(false);setLumaKey(0);setChromaKey(0);}}>Off</button>
+                    <button className={`grade-btn${punchThrough?' active':''}`}
+                      style={{flex:'1 1 auto',fontSize:10}}
+                      onClick={()=>{setPunchThrough(true);setLumaKey(0);setChromaKey(0);}}>✦ Punch-Through</button>
+                    <button className={`grade-btn${!punchThrough&&lumaKey>0&&chromaKey<=0?' active':''}`}
+                      style={{flex:'1 1 auto',fontSize:10}}
+                      onClick={()=>{setPunchThrough(false);setLumaKey(0.08);setChromaKey(0);}}>Dark Screen</button>
+                    <button className={`grade-btn${!punchThrough&&chromaKey>0?' active':''}`}
+                      style={{flex:'1 1 auto',fontSize:10}}
+                      onClick={()=>{setPunchThrough(false);setChromaKey(0.12);setLumaKey(0);}}>Color Key</button>
                   </div>
 
-                  {lumaKey>0&&chromaKey<=0&&(
+                  {punchThrough&&(
+                    <p style={{fontSize:10,color:'rgba(91,156,246,0.9)',lineHeight:1.5,marginTop:6,marginBottom:6,
+                      padding:'6px 8px',borderRadius:6,background:'rgba(91,156,246,0.08)',border:'1px solid rgba(91,156,246,0.15)'}}>
+                      ✦ Screen area is cut out and recording plays below — no keying needed. Works with any mockup.
+                    </p>
+                  )}
+
+                  {!punchThrough&&lumaKey>0&&chromaKey<=0&&(
                     <>
                       <Slider label="Luma Threshold" min={0.01} max={0.5} step={0.01} value={lumaKey} onChange={setLumaKey}/>
                       <Slider label="Softness" min={0.01} max={0.2} step={0.01} value={lumaSoft} onChange={setLumaSoft}/>
                       <p style={{fontSize:10,color:'var(--muted)',lineHeight:1.5,marginTop:5}}>
-                        Start around 0.08. Raise until the screen area clears. Keep pins at the actual screen glass corners.
+                        Start around 0.08. Raise until the screen area clears. Use a mockup with a dark/black screen.
                       </p>
                     </>
                   )}
-                  {chromaKey>0&&(
+                  {!punchThrough&&chromaKey>0&&(
                     <>
-                      <div style={{marginBottom:6}}>
+                      <div style={{marginBottom:6,marginTop:6}}>
                         <div style={{fontSize:9,fontWeight:700,letterSpacing:'.8px',textTransform:'uppercase',color:'var(--muted)',marginBottom:5}}>Screen Color — pick manually</div>
                         <div style={{display:'flex',alignItems:'center',gap:8}}>
                           <div style={{position:'relative',flexShrink:0}}>
@@ -2055,7 +2124,7 @@ export default function App(){
                               style={{width:'100%',fontSize:11,padding:'4px 6px',
                                 background:'var(--bg)',border:'1px solid var(--border)',color:'var(--text)',
                                 borderRadius:4,fontFamily:'monospace',letterSpacing:'.05em',boxSizing:'border-box' as const}}/>
-                            <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>Click swatch or type hex value</div>
+                            <div style={{fontSize:9,color:'var(--muted)',marginTop:2}}>Click swatch or type hex</div>
                           </div>
                         </div>
                       </div>
@@ -2063,6 +2132,37 @@ export default function App(){
                       <Slider label="Softness" min={0.01} max={0.2} step={0.01} value={lumaSoft} onChange={setLumaSoft}/>
                       <p style={{fontSize:10,color:'var(--muted)',lineHeight:1.5,marginTop:5}}>
                         Pick the exact screen colour. Raise threshold until screen clears — stop before the device body bleeds through.
+                      </p>
+                    </>
+                  )}
+
+                  {/* Camera hole / punch-hole cutout */}
+                  <div className="sec-title" style={{marginTop:14,marginBottom:5}}>Camera Hole</div>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+                    <span style={{fontSize:11,color:'var(--muted)',flex:1}}>Punch-hole / notch</span>
+                    <button className={`grade-btn${camHole?' active':''}`} onClick={()=>setCamHole(v=>!v)}>
+                      {camHole?'● On':'○ Off'}
+                    </button>
+                  </div>
+                  {camHole&&(
+                    <>
+                      <div style={{display:'flex',gap:5,marginBottom:4}}>
+                        <div style={{flex:1}}>
+                          <div className="sl-lbl" style={{marginBottom:2}}><span>X position</span><span>{Math.round(camX*100)}%</span></div>
+                          <input type="range" min={0} max={1} step={0.01} value={camX}
+                            onChange={e=>setCamX(+e.target.value)} style={{width:'100%'}}/>
+                        </div>
+                        <div style={{flex:1}}>
+                          <div className="sl-lbl" style={{marginBottom:2}}><span>Y position</span><span>{Math.round(camY*100)}%</span></div>
+                          <input type="range" min={0} max={0.2} step={0.005} value={camY}
+                            onChange={e=>setCamY(+e.target.value)} style={{width:'100%'}}/>
+                        </div>
+                      </div>
+                      <div className="sl-lbl" style={{marginBottom:2}}><span>Hole size</span><span>{camRadius}px</span></div>
+                      <input type="range" min={6} max={60} step={1} value={camRadius}
+                        onChange={e=>setCamRadius(+e.target.value)} style={{width:'100%',marginBottom:6}}/>
+                      <p style={{fontSize:9.5,color:'var(--muted)',lineHeight:1.5}}>
+                        Cuts a circular hole so the mockup's camera shows through the recording.
                       </p>
                     </>
                   )}
