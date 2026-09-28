@@ -913,6 +913,8 @@ export default function App(){
   const [lumaSoft,   setLumaSoft]   = useState(0.08);
   const [chromaKey,  setChromaKey]  = useState(0.0);
   const [punchThrough, setPunchThrough] = useState(false);
+  const [autoFillCanvas, setAutoFillCanvas] = useState(false);
+  const [autoRecScale,   setAutoRecScale]   = useState(1.0);
   const [camHole,    setCamHole]    = useState(false);
   const [camX,       setCamX]       = useState(0.50);
   const [camY,       setCamY]       = useState(0.04);
@@ -975,7 +977,9 @@ export default function App(){
   const lumaKeyRef   = useRef(0.0);
   const lumaSoftRef  = useRef(0.08);
   const chromaKeyRef    = useRef(0.0);
-  const punchThroughRef = useRef(false);
+  const punchThroughRef   = useRef(false);
+  const autoFillRef       = useRef(false);
+  const autoRecScaleRef   = useRef(1.0);
   const camHoleRef      = useRef(false);
   const camXRef         = useRef(0.50);
   const camYRef         = useRef(0.04);
@@ -1038,6 +1042,8 @@ export default function App(){
   useEffect(()=>{lumaSoftRef.current=lumaSoft},[lumaSoft]);
   useEffect(()=>{chromaKeyRef.current=chromaKey},[chromaKey]);
   useEffect(()=>{punchThroughRef.current=punchThrough},[punchThrough]);
+  useEffect(()=>{autoFillRef.current=autoFillCanvas},[autoFillCanvas]);
+  useEffect(()=>{autoRecScaleRef.current=autoRecScale},[autoRecScale]);
   useEffect(()=>{camHoleRef.current=camHole},[camHole]);
   useEffect(()=>{camXRef.current=camX},[camX]);
   useEffect(()=>{camYRef.current=camY},[camY]);
@@ -1142,46 +1148,48 @@ export default function App(){
           drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
         }
       } else {
-        // AUTO mode: recording first at detected corners, then mockup WITH chroma key on top.
-        // The chroma key is the authoritative screen boundary — it removes only the green
-        // screen area, so recording can ONLY show through the actual screen. Any corner
-        // detection inaccuracy (over/undershoot) is automatically corrected by the mask.
+        // AUTO mode: recording below, mockup WITH chroma key on top masks to screen only.
         const ac=screenCornersRef.current;
         const cUni={uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current};
-        if(ac){
-          // Step 1 — recording placed at detected corners (fills the screen area)
+        const fill=autoFillRef.current;
+        const scl=autoRecScaleRef.current;
+
+        // Upload mockup frame once (needed by both branches)
+        if(mReadyRef.current&&mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
+        // Upload recording frame once
+        if(rReadyRef.current&&!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
+
+        if(fill){
+          // ── Fill-Canvas mode ──────────────────────────────────────────────
+          // Recording fills the entire canvas — chroma key is the only mask.
+          // Works for moving-phone videos: as the green screen moves each frame,
+          // the chroma key follows it and reveals the recording in the right place.
           if(rReadyRef.current){
-            if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
-            const np=ac.map(p=>({x:p.x*W,y:p.y*H})) as Quad;
-            const vt=pinVerts(np,W,H);
-            if(vt){
-              drawQuad(gl,screenRecRef.current||plain,rt,vt,{uEdge:0});
-            }
+            drawQuad(gl,screenRecRef.current||plain,rt,coverVerts(rW,rH,W,H),
+              {uEdge:0,uRx:0,uRy:0,uCamPos:[0.5,0.04] as [number,number],uCamR:0,uCamAsp:1});
           }
-          // Step 2 — mockup with chroma key: green screen→transparent (recording shows),
-          // bezel/background→opaque (recording hidden). Perfect mask, no bleed possible.
-          if(mReadyRef.current){
-            if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
-            drawQuad(gl,chroma,mt,bgVerts(),cUni);
+          if(mReadyRef.current) drawQuad(gl,chroma,mt,bgVerts(),cUni);
+        } else if(ac){
+          // ── Detected-corners mode (with optional scale) ───────────────────
+          const cx=(ac[0].x+ac[1].x+ac[2].x+ac[3].x)/4;
+          const cy=(ac[0].y+ac[1].y+ac[2].y+ac[3].y)/4;
+          const sac=(scl===1?ac:ac.map(p=>({x:cx+(p.x-cx)*scl,y:cy+(p.y-cy)*scl}))) as Quad;
+          const np=sac.map(p=>({x:p.x*W,y:p.y*H})) as Quad;
+          const vt=pinVerts(np,W,H);
+          if(rReadyRef.current&&vt){
+            drawQuad(gl,screenRecRef.current||plain,rt,vt,
+              {uEdge:0,uRx:0,uRy:0,uCamPos:[0.5,0.04] as [number,number],uCamR:0,uCamAsp:1});
           }
-          // Step 3 — glass surface FX on top of the composited screen
-          if(rReadyRef.current&&screenFxRef.current){
-            const np=ac.map(p=>({x:p.x*W,y:p.y*H})) as Quad;
-            const vt=pinVerts(np,W,H);
-            if(vt) drawQuad(gl,screenFxRef.current,rt,vt,{});
-          }
+          if(mReadyRef.current) drawQuad(gl,chroma,mt,bgVerts(),cUni);
+          if(rReadyRef.current&&screenFxRef.current&&vt) drawQuad(gl,screenFxRef.current,rt,vt,{});
         } else {
-          // Corners not detected — recording at bounding-box under chroma key (same mask logic)
+          // ── Fallback: no corners detected ─────────────────────────────────
           if(rReadyRef.current){
-            if(!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
             const sb=screenBoundsRef.current;
             const rvt=sb?boundsVerts(sb,rW,rH,W,H):coverVerts(rW,rH,W,H);
             drawQuad(gl,plain,rt,rvt,{uEdge:0,uOpacity:1});
           }
-          if(mReadyRef.current){
-            if(mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
-            drawQuad(gl,chroma,mt,bgVerts(),cUni);
-          }
+          if(mReadyRef.current) drawQuad(gl,chroma,mt,bgVerts(),cUni);
         }
       }
 
@@ -2337,6 +2345,30 @@ export default function App(){
                   <Slider label="Threshold" min={0.05} max={0.8} step={0.01} value={keyThresh} onChange={setKeyThresh}/>
                   <Slider label="Softness"  min={0.01} max={0.4} step={0.01} value={keySoft}   onChange={setKeySoft}/>
                   <Slider label="Despill"   min={0}    max={1}   step={0.01} value={keySpill}  onChange={setKeySpill}/>
+
+                  {/* Recording placement */}
+                  <div className="sec-title" style={{marginTop:14,marginBottom:5}}>Recording Placement</div>
+                  <div style={{display:'flex',gap:5,marginBottom:8}}>
+                    <button className={`grade-btn${!autoFillCanvas?' active':''}`} style={{flex:1,fontSize:10}}
+                      onClick={()=>setAutoFillCanvas(false)}>Fit Screen</button>
+                    <button className={`grade-btn${autoFillCanvas?' active':''}`} style={{flex:1,fontSize:10}}
+                      onClick={()=>setAutoFillCanvas(true)}>✦ Fill Canvas</button>
+                  </div>
+                  {autoFillCanvas?(
+                    <p style={{fontSize:10,color:'rgba(91,156,246,0.9)',lineHeight:1.5,
+                      padding:'6px 8px',borderRadius:6,background:'rgba(91,156,246,0.08)',border:'1px solid rgba(91,156,246,0.15)',marginBottom:6}}>
+                      Recording fills the entire canvas — chroma key acts as a per-frame mask. Best for moving-phone videos where the screen position changes.
+                    </p>
+                  ):(
+                    <>
+                      <div className="sl-lbl" style={{marginBottom:3}}><span>Screen Scale</span><span>{Math.round(autoRecScale*100)}%</span></div>
+                      <input type="range" min={0.5} max={1.2} step={0.01} value={autoRecScale}
+                        onChange={e=>setAutoRecScale(+e.target.value)} style={{width:'100%',marginBottom:4}}/>
+                      <p style={{fontSize:9.5,color:'var(--muted)',lineHeight:1.5,marginBottom:4}}>
+                        Shrink below 100% if the recording overflows the screen edges.
+                      </p>
+                    </>
+                  )}
                 </div>
               )}
 
