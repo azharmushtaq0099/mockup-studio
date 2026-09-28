@@ -364,6 +364,22 @@ function boundsVerts(b:{x0:number;y0:number;x1:number;y1:number}, rW:number, rH:
     nx1,nyB,u1,v0,1, nx1,nyT,u1,v1,1, nx0,nyT,u0,v1,1,
   ]);
 }
+// Place the full recording (UV 0→1) at `scale` fraction of canvas height, centered at (cx,cy)
+// scale=0.40 ≈ phone screen filling 40% of canvas height.  Full recording always visible.
+function zoomVerts(rW:number,rH:number,W:number,H:number,cx:number,cy:number,scale:number): Float32Array {
+  const rAsp=rW/rH, cAsp=W/H;
+  const ndcHH=scale;
+  const ndcHW=scale*rAsp/cAsp;
+  const ndcCx=cx*2-1, ndcCy=1-cy*2;
+  return new Float32Array([
+    ndcCx-ndcHW, ndcCy-ndcHH, 0,0,1,
+    ndcCx+ndcHW, ndcCy-ndcHH, 1,0,1,
+    ndcCx-ndcHW, ndcCy+ndcHH, 0,1,1,
+    ndcCx+ndcHW, ndcCy-ndcHH, 1,0,1,
+    ndcCx+ndcHW, ndcCy+ndcHH, 1,1,1,
+    ndcCx-ndcHW, ndcCy+ndcHH, 0,1,1,
+  ]);
+}
 function coverUVBounds(sw:number,sh:number,dw:number,dh:number):[number,number,number,number]{
   const sa=sw/sh,da=dw/dh; let u0=0,u1=1,v0=0,v1=1;
   if(sa>da){const m=(1-da/sa)/2;u0=m;u1=1-m;}
@@ -914,6 +930,7 @@ export default function App(){
   const [chromaKey,  setChromaKey]  = useState(0.0);
   const [punchThrough, setPunchThrough] = useState(false);
   const [autoPlacement, setAutoPlacement] = useState<'fit'|'corners'|'fill'>('fit');
+  const [autoFitScale,   setAutoFitScale]  = useState(0.40);
   const [autoRecScale,   setAutoRecScale]   = useState(1.0);
   const [camHole,    setCamHole]    = useState(false);
   const [camX,       setCamX]       = useState(0.50);
@@ -979,6 +996,7 @@ export default function App(){
   const chromaKeyRef    = useRef(0.0);
   const punchThroughRef   = useRef(false);
   const autoPlacementRef  = useRef<'fit'|'corners'|'fill'>('fit');
+  const autoFitScaleRef   = useRef(0.40);
   const autoRecScaleRef   = useRef(1.0);
   const camHoleRef      = useRef(false);
   const camXRef         = useRef(0.50);
@@ -1043,6 +1061,7 @@ export default function App(){
   useEffect(()=>{chromaKeyRef.current=chromaKey},[chromaKey]);
   useEffect(()=>{punchThroughRef.current=punchThrough},[punchThrough]);
   useEffect(()=>{autoPlacementRef.current=autoPlacement},[autoPlacement]);
+  useEffect(()=>{autoFitScaleRef.current=autoFitScale},[autoFitScale]);
   useEffect(()=>{autoRecScaleRef.current=autoRecScale},[autoRecScale]);
   useEffect(()=>{camHoleRef.current=camHole},[camHole]);
   useEffect(()=>{camXRef.current=camX},[camX]);
@@ -1171,11 +1190,13 @@ export default function App(){
           if(mReadyRef.current) drawQuad(gl,chroma,mt,bgVerts(),cUni);
         } else if(placement==='fit'){
           // ── Scale-to-Fit mode (default) ───────────────────────────────────
-          // Recording is scaled to cover-fit the detected screen bounding box.
-          // Shows the full recording at the correct scale — fixes the zoomed-in problem.
-          const sb=screenBoundsRef.current;
+          // Recording placed at user-set % of canvas height, centered on detected screen
+          // (or canvas center if detection failed). Full recording always visible.
           if(rReadyRef.current){
-            const rvt=sb?boundsVerts(sb,rW,rH,W,H):coverVerts(rW,rH,W,H);
+            const sb=screenBoundsRef.current;
+            const cx=sb?(sb.x0+sb.x1)/2:0.5;
+            const cy=sb?(sb.y0+sb.y1)/2:0.5;
+            const rvt=zoomVerts(rW,rH,W,H,cx,cy,autoFitScaleRef.current);
             drawQuad(gl,screenRecRef.current||plain,rt,rvt,
               {uEdge:0,uRx:0,uRy:0,uCamPos:[0.5,0.04] as [number,number],uCamR:0,uCamAsp:1});
           }
@@ -2368,10 +2389,19 @@ export default function App(){
                       onClick={()=>setAutoPlacement('fill')}>Fill Canvas</button>
                   </div>
                   {autoPlacement==='fit'&&(
-                    <p style={{fontSize:10,color:'rgba(91,156,246,0.9)',lineHeight:1.5,
-                      padding:'6px 8px',borderRadius:6,background:'rgba(91,156,246,0.08)',border:'1px solid rgba(91,156,246,0.15)',marginBottom:6}}>
-                      ✦ Recommended — scales the full recording to fit the detected screen area. Fixes the zoomed-in / too-large problem.
-                    </p>
+                    <>
+                      <p style={{fontSize:9.5,color:'rgba(91,156,246,0.9)',lineHeight:1.5,marginBottom:6}}>
+                        Full recording scaled to fit screen. Drag <b>Screen Size</b> until recording fills the phone screen exactly.
+                      </p>
+                      <div className="sl-lbl" style={{marginBottom:3}}>
+                        <span>Screen Size</span><span>{Math.round(autoFitScale*100)}%</span>
+                      </div>
+                      <input type="range" min={0.05} max={1.0} step={0.01} value={autoFitScale}
+                        onChange={e=>setAutoFitScale(+e.target.value)} style={{width:'100%',marginBottom:4}}/>
+                      <p style={{fontSize:9,color:'var(--muted)',lineHeight:1.4,marginBottom:4}}>
+                        Increase until recording covers the phone screen. Typical range: 25–55%.
+                      </p>
+                    </>
                   )}
                   {autoPlacement==='corners'&&(
                     <>
