@@ -337,6 +337,119 @@ function resizeFBO(gl: WebGLRenderingContext, fbo: FBO, w: number, h: number) {
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
 }
 
+// ─── Built-in device templates ────────────────────────────────────────────────
+function rrect(ctx:CanvasRenderingContext2D,x:number,y:number,w:number,h:number,r:number){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.arcTo(x+w,y,x+w,y+r,r);
+  ctx.lineTo(x+w,y+h-r);ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+  ctx.lineTo(x+r,y+h);ctx.arcTo(x,y+h,x,y+h-r,r);
+  ctx.lineTo(x,y+r);ctx.arcTo(x,y,x+r,y,r);ctx.closePath();
+}
+function rf(ctx:CanvasRenderingContext2D,x:number,y:number,w:number,h:number,r:number,c:string){ctx.fillStyle=c;rrect(ctx,x,y,w,h,r);ctx.fill();}
+
+const BUILTIN_TPLS=[
+  {id:'iphone-pro', name:'iPhone Pro', icon:'📱', dark:true,  island:'di'},
+  {id:'iphone',     name:'iPhone',     icon:'📱', dark:false, island:'notch'},
+  {id:'android',    name:'Android',    icon:'📱', dark:true,  island:'hole'},
+  {id:'hand',       name:'Hand',       icon:'🤳', dark:true,  island:'di'},
+] as const;
+type TplId = typeof BUILTIN_TPLS[number]['id'];
+
+function buildBuiltinTemplate(id:TplId, screenColor='#00ff00'): Promise<{url:string;frac:Quad}> {
+  const W=1080, H=1920;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const ctx=c.getContext('2d')!;
+  const isHand = id==='hand';
+  const dark = id!=='iphone';
+
+  // Phone geometry — slightly shorter when showing hand so fingers are visible
+  const PX=80, PY=isHand?50:60, PW=920, PH=isHand?1680:1800, PR=105;
+  const SX=PX+26, SY=PY+68, SW=PW-52, SH=PH-124, SR=74;
+  const frac: Quad=[{x:SX/W,y:SY/H},{x:(SX+SW)/W,y:SY/H},{x:(SX+SW)/W,y:(SY+SH)/H},{x:SX/W,y:(SY+SH)/H}];
+
+  // ── Background ──
+  const bgG=ctx.createLinearGradient(0,0,0,H);
+  if(isHand){bgG.addColorStop(0,'#e2ddd6');bgG.addColorStop(1,'#ccc8c0');}
+  else if(dark){bgG.addColorStop(0,'#111116');bgG.addColorStop(1,'#0a0a0e');}
+  else{bgG.addColorStop(0,'#f4f4f8');bgG.addColorStop(1,'#e8e8ed');}
+  ctx.fillStyle=bgG;ctx.fillRect(0,0,W,H);
+  // Soft glow behind phone
+  const gl=ctx.createRadialGradient(W/2,H*0.44,0,W/2,H*0.44,H*0.52);
+  gl.addColorStop(0,dark?'rgba(50,50,70,.35)':'rgba(180,180,200,.3)');gl.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=gl;ctx.fillRect(0,0,W,H);
+
+  if(isHand){
+    // ── Hand ── drawn BEFORE phone so it appears behind
+    const skin='#c8906a', skinD='#a87450', skinH='#daa880';
+    const palmT=PY+PH-120;
+    // Palm
+    ctx.shadowColor='rgba(0,0,0,.25)';ctx.shadowBlur=30;
+    rf(ctx,80,palmT,920,H-palmT+20,80,skin);
+    ctx.shadowColor='transparent';ctx.shadowBlur=0;
+    // Fingers (4)
+    const fgs=[{x:125,w:116,h:540,d:0},{x:268,w:116,h:570,d:-18},{x:411,w:116,h:570,d:-22},{x:554,w:116,h:545,d:-12}];
+    for(const f of fgs){
+      rf(ctx,f.x,palmT-f.h+f.d,f.w,f.h+20,58,skin);
+      // knuckle crease
+      ctx.strokeStyle=skinD;ctx.lineWidth=4;
+      ctx.beginPath();ctx.moveTo(f.x+18,palmT-f.h+f.d+60);ctx.quadraticCurveTo(f.x+f.w/2,palmT-f.h+f.d+45,f.x+f.w-18,palmT-f.h+f.d+60);ctx.stroke();
+      rf(ctx,f.x+16,palmT-f.h+f.d+62,f.w-32,18,9,skinH);
+    }
+  }
+
+  // ── Phone shadow ──
+  ctx.shadowColor='rgba(0,0,0,.65)';ctx.shadowBlur=60;ctx.shadowOffsetY=32;
+  rf(ctx,PX,PY,PW,PH,PR,dark?'#16161c':'#dcdce4');
+  ctx.shadowColor='transparent';ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+
+  // ── Phone body ──
+  rf(ctx,PX,PY,PW,PH,PR,dark?'#18181e':'#e4e4ea');
+  // Frame ring
+  ctx.strokeStyle=dark?'#35353d':'#c4c4cc';ctx.lineWidth=5;
+  rrect(ctx,PX+2.5,PY+2.5,PW-5,PH-5,PR-2);ctx.stroke();
+
+  // ── Screen ──
+  rf(ctx,SX,SY,SW,SH,SR,screenColor);
+
+  // ── Camera feature ──
+  ctx.fillStyle='#000';
+  if(id==='iphone-pro'||id==='hand'){
+    // Dynamic Island
+    const DIX=SX+SW/2-77, DIY=SY+38, DIW=154, DIH=46;
+    rf(ctx,DIX,DIY,DIW,DIH,23,'#000');
+  } else if(id==='iphone'){
+    // Notch (pill centered)
+    rf(ctx,SX+SW/2-130,SY,260,46,0,'#000');
+    rf(ctx,SX+SW/2-118,SY,236,58,15,'#000');
+  } else {
+    // Hole-punch
+    ctx.beginPath();ctx.arc(SX+SW/2,SY+54,22,0,Math.PI*2);ctx.fill();
+  }
+
+  // ── Side buttons ──
+  const btn=dark?'#28282e':'#bcc';
+  rf(ctx,PX-8,PY+220,10,52,5,btn);  // silent / mute
+  rf(ctx,PX-8,PY+310,10,90,5,btn);  // vol+
+  rf(ctx,PX-8,PY+430,10,90,5,btn);  // vol−
+  rf(ctx,PX+PW-2,PY+350,10,120,5,btn); // power
+
+  if(isHand){
+    // ── Thumb in front (right side) ──
+    const skin='#c8906a', skinD='#a87450';
+    ctx.save();
+    ctx.translate(PX+PW+20,PY+PH*0.52);ctx.rotate(-0.18);
+    rf(ctx,-55,-210,118,360,59,skin);
+    ctx.strokeStyle=skinD;ctx.lineWidth=4;
+    ctx.beginPath();ctx.moveTo(-25,-140);ctx.quadraticCurveTo(4,-158,32,-140);ctx.stroke();
+    ctx.restore();
+    // Palm overlap at phone bottom
+    const skin2='#c8906a';
+    rf(ctx,80,PY+PH-100,920,200,0,skin2);
+  }
+
+  return new Promise(res=>{c.toBlob(b=>res({url:URL.createObjectURL(b!),frac}),'image/png');});
+}
+
 // ─── Geometry ─────────────────────────────────────────────────────────────────
 
 function bgVerts(): Float32Array {
@@ -888,6 +1001,7 @@ export default function App(){
   const [csz,       setCsz]      = useState({w:840,h:520});
   const [native,    setNative]   = useState({w:840,h:520});
   const [pins,      setPins]     = useState<Quad>(()=>defaultCorners(840,520));
+  const [tplScreenFrac, setTplScreenFrac] = useState<Quad|null>(null);
   const [keyColor,  setKeyColor] = useState('#00ff00');
   const [keyThresh, setKeyThresh]= useState(0.44);
   const [keySoft,   setKeySoft]  = useState(0.09);
@@ -1029,6 +1143,12 @@ export default function App(){
   const autoStopRef      = useRef<(()=>void)|null>(null);
 
   useEffect(()=>{pinsRef.current=pins},[pins]);
+  // When a built-in template is active, re-apply exact screen corners whenever canvas resizes
+  useEffect(()=>{
+    if(!tplScreenFrac||!csz.w||!csz.h) return;
+    const p=tplScreenFrac.map(f=>({x:f.x*csz.w,y:f.y*csz.h})) as Quad;
+    setPins(p); pinsRef.current=p;
+  },[csz,tplScreenFrac]);
   useEffect(()=>{cszRef.current=csz},[csz]);
   useEffect(()=>{recNatRef.current=recNative},[recNative]);
   useEffect(()=>{
@@ -1488,6 +1608,18 @@ export default function App(){
   const loadMockup=useCallback((file:File)=>{
     const isV=file.type.startsWith('video/')||/\.(mp4|webm|mov|mkv)$/i.test(file.name);
     setMockupIsV(isV); setMockupSrc(URL.createObjectURL(file)); setMockupFile(file.name);
+    setTplScreenFrac(null); // clear template lock when user uploads their own
+  },[]);
+
+  const selectTemplate=useCallback(async(id:TplId)=>{
+    const {url,frac}=await buildBuiltinTemplate(id,'#00ff00');
+    setMockupIsV(false);
+    setMockupFile(BUILTIN_TPLS.find(t=>t.id===id)?.name??id);
+    setMockupSrc(url);
+    setTplScreenFrac(frac);   // pins will be set once csz updates after image loads
+    setMode('manual');
+    // Pre-set key colour green in case user switches to auto
+    setKeyColor('#00ff00');
   },[]);
 
   const loadRec=useCallback((file:File)=>{
@@ -2029,7 +2161,25 @@ export default function App(){
               </div>
 
               <div className="sec">
-                <div className="sec-title">{mode==='auto'?'Mockup (solid-colour screen)':'Mockup / Background'}</div>
+                <div className="sec-title">Built-in Templates</div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:8}}>
+                  {BUILTIN_TPLS.map(t=>(
+                    <button key={t.id}
+                      className={`grade-btn${mockupFile===t.name?' active':''}`}
+                      style={{padding:'8px 4px',fontSize:10,lineHeight:1.4,display:'flex',flexDirection:'column',alignItems:'center',gap:3}}
+                      onClick={()=>selectTemplate(t.id)}>
+                      <span style={{fontSize:20}}>{t.icon}</span>
+                      <span>{t.name}</span>
+                    </button>
+                  ))}
+                </div>
+                <p style={{fontSize:9,color:'var(--muted)',lineHeight:1.5,marginBottom:6}}>
+                  Perfectly still — recording pins to exact screen corners, zero drift. Load your recording and export.
+                </p>
+              </div>
+
+              <div className="sec">
+                <div className="sec-title">{mode==='auto'?'Mockup (solid-colour screen)':'Custom Mockup'}</div>
                 <DropZone label="Upload mockup" hint="PNG · JPG · MP4 · WebM"
                   file={mockupFile} onFile={loadMockup} accept="image/*,video/*" icon="🖼️"/>
                 {mode==='auto'&&!mockupSrc&&(
