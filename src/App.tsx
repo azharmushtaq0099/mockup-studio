@@ -366,18 +366,17 @@ function boundsVerts(b:{x0:number;y0:number;x1:number;y1:number}, rW:number, rH:
 }
 // Place the full recording (UV 0→1) at `scale` fraction of canvas height, centered at (cx,cy)
 // scale=0.40 ≈ phone screen filling 40% of canvas height.  Full recording always visible.
-function zoomVerts(rW:number,rH:number,W:number,H:number,cx:number,cy:number,scale:number): Float32Array {
-  const rAsp=rW/rH, cAsp=W/H;
-  const ndcHH=scale;
-  const ndcHW=scale*rAsp/cAsp;
+// scaleW/scaleH are NDC half-extents: 0.20 = recording spans 40% of canvas dimension.
+// Independent W and H let user match any phone screen aspect ratio (iPhone 14 Pro = ~46:100 vs 9:16).
+function zoomVerts(cx:number,cy:number,scaleW:number,scaleH:number): Float32Array {
   const ndcCx=cx*2-1, ndcCy=1-cy*2;
   return new Float32Array([
-    ndcCx-ndcHW, ndcCy-ndcHH, 0,0,1,
-    ndcCx+ndcHW, ndcCy-ndcHH, 1,0,1,
-    ndcCx-ndcHW, ndcCy+ndcHH, 0,1,1,
-    ndcCx+ndcHW, ndcCy-ndcHH, 1,0,1,
-    ndcCx+ndcHW, ndcCy+ndcHH, 1,1,1,
-    ndcCx-ndcHW, ndcCy+ndcHH, 0,1,1,
+    ndcCx-scaleW, ndcCy-scaleH, 0,0,1,
+    ndcCx+scaleW, ndcCy-scaleH, 1,0,1,
+    ndcCx-scaleW, ndcCy+scaleH, 0,1,1,
+    ndcCx+scaleW, ndcCy-scaleH, 1,0,1,
+    ndcCx+scaleW, ndcCy+scaleH, 1,1,1,
+    ndcCx-scaleW, ndcCy+scaleH, 0,1,1,
   ]);
 }
 function coverUVBounds(sw:number,sh:number,dw:number,dh:number):[number,number,number,number]{
@@ -929,8 +928,10 @@ export default function App(){
   const [lumaSoft,   setLumaSoft]   = useState(0.08);
   const [chromaKey,  setChromaKey]  = useState(0.0);
   const [punchThrough, setPunchThrough] = useState(false);
-  const [autoPlacement, setAutoPlacement] = useState<'fit'|'corners'|'fill'>('fit');
-  const [autoFitScale,   setAutoFitScale]  = useState(0.40);
+  const [autoPlacement, setAutoPlacement]  = useState<'fit'|'corners'|'fill'>('fit');
+  const [autoFitScaleW,  setAutoFitScaleW] = useState(0.20); // NDC half-width (×2 = % of canvas width)
+  const [autoFitScaleH,  setAutoFitScaleH] = useState(0.38); // NDC half-height
+  const [autoFitY,       setAutoFitY]      = useState(0.50); // vertical center (0=top, 1=bottom)
   const [autoRecScale,   setAutoRecScale]   = useState(1.0);
   const [camHole,    setCamHole]    = useState(false);
   const [camX,       setCamX]       = useState(0.50);
@@ -996,7 +997,9 @@ export default function App(){
   const chromaKeyRef    = useRef(0.0);
   const punchThroughRef   = useRef(false);
   const autoPlacementRef  = useRef<'fit'|'corners'|'fill'>('fit');
-  const autoFitScaleRef   = useRef(0.40);
+  const autoFitScaleWRef  = useRef(0.20);
+  const autoFitScaleHRef  = useRef(0.38);
+  const autoFitYRef       = useRef(0.50);
   const autoRecScaleRef   = useRef(1.0);
   const camHoleRef      = useRef(false);
   const camXRef         = useRef(0.50);
@@ -1061,7 +1064,9 @@ export default function App(){
   useEffect(()=>{chromaKeyRef.current=chromaKey},[chromaKey]);
   useEffect(()=>{punchThroughRef.current=punchThrough},[punchThrough]);
   useEffect(()=>{autoPlacementRef.current=autoPlacement},[autoPlacement]);
-  useEffect(()=>{autoFitScaleRef.current=autoFitScale},[autoFitScale]);
+  useEffect(()=>{autoFitScaleWRef.current=autoFitScaleW},[autoFitScaleW]);
+  useEffect(()=>{autoFitScaleHRef.current=autoFitScaleH},[autoFitScaleH]);
+  useEffect(()=>{autoFitYRef.current=autoFitY},[autoFitY]);
   useEffect(()=>{autoRecScaleRef.current=autoRecScale},[autoRecScale]);
   useEffect(()=>{camHoleRef.current=camHole},[camHole]);
   useEffect(()=>{camXRef.current=camX},[camX]);
@@ -1196,7 +1201,7 @@ export default function App(){
             const sb=screenBoundsRef.current;
             const cx=sb?(sb.x0+sb.x1)/2:0.5;
             const cy=sb?(sb.y0+sb.y1)/2:0.5;
-            const rvt=zoomVerts(rW,rH,W,H,cx,cy,autoFitScaleRef.current);
+            const rvt=zoomVerts(cx,autoFitYRef.current,autoFitScaleWRef.current,autoFitScaleHRef.current);
             drawQuad(gl,screenRecRef.current||plain,rt,rvt,
               {uEdge:0,uRx:0,uRy:0,uCamPos:[0.5,0.04] as [number,number],uCamR:0,uCamAsp:1});
           }
@@ -2391,15 +2396,25 @@ export default function App(){
                   {autoPlacement==='fit'&&(
                     <>
                       <p style={{fontSize:9.5,color:'rgba(91,156,246,0.9)',lineHeight:1.5,marginBottom:6}}>
-                        Full recording scaled to fit screen. Drag <b>Screen Size</b> until recording fills the phone screen exactly.
+                        Adjust Width + Height independently to fill the phone screen exactly.
                       </p>
-                      <div className="sl-lbl" style={{marginBottom:3}}>
-                        <span>Screen Size</span><span>{Math.round(autoFitScale*100)}%</span>
+                      <div className="sl-lbl" style={{marginBottom:2}}>
+                        <span>Width</span><span>{Math.round(autoFitScaleW*200)}%</span>
                       </div>
-                      <input type="range" min={0.05} max={1.0} step={0.01} value={autoFitScale}
-                        onChange={e=>setAutoFitScale(+e.target.value)} style={{width:'100%',marginBottom:4}}/>
+                      <input type="range" min={0.02} max={0.80} step={0.01} value={autoFitScaleW}
+                        onChange={e=>setAutoFitScaleW(+e.target.value)} style={{width:'100%',marginBottom:6}}/>
+                      <div className="sl-lbl" style={{marginBottom:2}}>
+                        <span>Height</span><span>{Math.round(autoFitScaleH*200)}%</span>
+                      </div>
+                      <input type="range" min={0.02} max={0.80} step={0.01} value={autoFitScaleH}
+                        onChange={e=>setAutoFitScaleH(+e.target.value)} style={{width:'100%',marginBottom:6}}/>
+                      <div className="sl-lbl" style={{marginBottom:2}}>
+                        <span>Vertical Pos</span><span>{Math.round(autoFitY*100)}%</span>
+                      </div>
+                      <input type="range" min={0.1} max={0.9} step={0.01} value={autoFitY}
+                        onChange={e=>setAutoFitY(+e.target.value)} style={{width:'100%',marginBottom:4}}/>
                       <p style={{fontSize:9,color:'var(--muted)',lineHeight:1.4,marginBottom:4}}>
-                        Increase until recording covers the phone screen. Typical range: 25–55%.
+                        Width/Height: dial each until recording exactly covers screen edges. Vertical Pos: shift up/down to center on phone screen.
                       </p>
                     </>
                   )}
