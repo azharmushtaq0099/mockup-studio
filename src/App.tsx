@@ -913,7 +913,7 @@ export default function App(){
   const [lumaSoft,   setLumaSoft]   = useState(0.08);
   const [chromaKey,  setChromaKey]  = useState(0.0);
   const [punchThrough, setPunchThrough] = useState(false);
-  const [autoFillCanvas, setAutoFillCanvas] = useState(false);
+  const [autoPlacement, setAutoPlacement] = useState<'fit'|'corners'|'fill'>('fit');
   const [autoRecScale,   setAutoRecScale]   = useState(1.0);
   const [camHole,    setCamHole]    = useState(false);
   const [camX,       setCamX]       = useState(0.50);
@@ -978,7 +978,7 @@ export default function App(){
   const lumaSoftRef  = useRef(0.08);
   const chromaKeyRef    = useRef(0.0);
   const punchThroughRef   = useRef(false);
-  const autoFillRef       = useRef(false);
+  const autoPlacementRef  = useRef<'fit'|'corners'|'fill'>('fit');
   const autoRecScaleRef   = useRef(1.0);
   const camHoleRef      = useRef(false);
   const camXRef         = useRef(0.50);
@@ -1042,7 +1042,7 @@ export default function App(){
   useEffect(()=>{lumaSoftRef.current=lumaSoft},[lumaSoft]);
   useEffect(()=>{chromaKeyRef.current=chromaKey},[chromaKey]);
   useEffect(()=>{punchThroughRef.current=punchThrough},[punchThrough]);
-  useEffect(()=>{autoFillRef.current=autoFillCanvas},[autoFillCanvas]);
+  useEffect(()=>{autoPlacementRef.current=autoPlacement},[autoPlacement]);
   useEffect(()=>{autoRecScaleRef.current=autoRecScale},[autoRecScale]);
   useEffect(()=>{camHoleRef.current=camHole},[camHole]);
   useEffect(()=>{camXRef.current=camX},[camX]);
@@ -1151,15 +1151,15 @@ export default function App(){
         // AUTO mode: recording below, mockup WITH chroma key on top masks to screen only.
         const ac=screenCornersRef.current;
         const cUni={uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current};
-        const fill=autoFillRef.current;
+        const placement=autoPlacementRef.current;
         const scl=autoRecScaleRef.current;
 
-        // Upload mockup frame once (needed by both branches)
+        // Upload mockup frame once (needed by all branches)
         if(mReadyRef.current&&mIsVRef.current&&mVid&&mVid.readyState>=2) uploadTex(gl,mt,mVid);
         // Upload recording frame once
         if(rReadyRef.current&&!rStaticRef.current&&rVid&&rVid.readyState>=2) uploadTex(gl,rt,rVid);
 
-        if(fill){
+        if(placement==='fill'){
           // ── Fill-Canvas mode ──────────────────────────────────────────────
           // Recording fills the entire canvas — chroma key is the only mask.
           // Works for moving-phone videos: as the green screen moves each frame,
@@ -1169,8 +1169,19 @@ export default function App(){
               {uEdge:0,uRx:0,uRy:0,uCamPos:[0.5,0.04] as [number,number],uCamR:0,uCamAsp:1});
           }
           if(mReadyRef.current) drawQuad(gl,chroma,mt,bgVerts(),cUni);
+        } else if(placement==='fit'){
+          // ── Scale-to-Fit mode (default) ───────────────────────────────────
+          // Recording is scaled to cover-fit the detected screen bounding box.
+          // Shows the full recording at the correct scale — fixes the zoomed-in problem.
+          const sb=screenBoundsRef.current;
+          if(rReadyRef.current){
+            const rvt=sb?boundsVerts(sb,rW,rH,W,H):coverVerts(rW,rH,W,H);
+            drawQuad(gl,screenRecRef.current||plain,rt,rvt,
+              {uEdge:0,uRx:0,uRy:0,uCamPos:[0.5,0.04] as [number,number],uCamR:0,uCamAsp:1});
+          }
+          if(mReadyRef.current) drawQuad(gl,chroma,mt,bgVerts(),cUni);
         } else if(ac){
-          // ── Detected-corners mode (with optional scale) ───────────────────
+          // ── Fit-Corners mode (perspective warp with optional scale) ───────
           const cx=(ac[0].x+ac[1].x+ac[2].x+ac[3].x)/4;
           const cy=(ac[0].y+ac[1].y+ac[2].y+ac[3].y)/4;
           const sac=(scl===1?ac:ac.map(p=>({x:cx+(p.x-cx)*scl,y:cy+(p.y-cy)*scl}))) as Quad;
@@ -2349,25 +2360,34 @@ export default function App(){
                   {/* Recording placement */}
                   <div className="sec-title" style={{marginTop:14,marginBottom:5}}>Recording Placement</div>
                   <div style={{display:'flex',gap:5,marginBottom:8}}>
-                    <button className={`grade-btn${!autoFillCanvas?' active':''}`} style={{flex:1,fontSize:10}}
-                      onClick={()=>setAutoFillCanvas(false)}>Fit Screen</button>
-                    <button className={`grade-btn${autoFillCanvas?' active':''}`} style={{flex:1,fontSize:10}}
-                      onClick={()=>setAutoFillCanvas(true)}>✦ Fill Canvas</button>
+                    <button className={`grade-btn${autoPlacement==='fit'?' active':''}`} style={{flex:1,fontSize:9.5}}
+                      onClick={()=>setAutoPlacement('fit')}>✦ Scale Fit</button>
+                    <button className={`grade-btn${autoPlacement==='corners'?' active':''}`} style={{flex:1,fontSize:9.5}}
+                      onClick={()=>setAutoPlacement('corners')}>Corners</button>
+                    <button className={`grade-btn${autoPlacement==='fill'?' active':''}`} style={{flex:1,fontSize:9.5}}
+                      onClick={()=>setAutoPlacement('fill')}>Fill Canvas</button>
                   </div>
-                  {autoFillCanvas?(
+                  {autoPlacement==='fit'&&(
                     <p style={{fontSize:10,color:'rgba(91,156,246,0.9)',lineHeight:1.5,
                       padding:'6px 8px',borderRadius:6,background:'rgba(91,156,246,0.08)',border:'1px solid rgba(91,156,246,0.15)',marginBottom:6}}>
-                      Recording fills the entire canvas — chroma key acts as a per-frame mask. Best for moving-phone videos where the screen position changes.
+                      ✦ Recommended — scales the full recording to fit the detected screen area. Fixes the zoomed-in / too-large problem.
                     </p>
-                  ):(
+                  )}
+                  {autoPlacement==='corners'&&(
                     <>
+                      <p style={{fontSize:9.5,color:'var(--muted)',lineHeight:1.5,marginBottom:4}}>
+                        Perspective-warps recording to exact detected corners. Use Screen Scale if the recording still overflows.
+                      </p>
                       <div className="sl-lbl" style={{marginBottom:3}}><span>Screen Scale</span><span>{Math.round(autoRecScale*100)}%</span></div>
                       <input type="range" min={0.5} max={1.2} step={0.01} value={autoRecScale}
                         onChange={e=>setAutoRecScale(+e.target.value)} style={{width:'100%',marginBottom:4}}/>
-                      <p style={{fontSize:9.5,color:'var(--muted)',lineHeight:1.5,marginBottom:4}}>
-                        Shrink below 100% if the recording overflows the screen edges.
-                      </p>
                     </>
+                  )}
+                  {autoPlacement==='fill'&&(
+                    <p style={{fontSize:10,color:'rgba(91,156,246,0.9)',lineHeight:1.5,
+                      padding:'6px 8px',borderRadius:6,background:'rgba(91,156,246,0.08)',border:'1px solid rgba(91,156,246,0.15)',marginBottom:6}}>
+                      Recording fills the entire canvas — chroma key is the only mask. Best for moving-phone videos where screen position changes each frame.
+                    </p>
                   )}
                 </div>
               )}
