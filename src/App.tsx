@@ -1274,7 +1274,9 @@ export default function App(){
             const vt=pinVerts(np,W,H);
             if(vt){
               const srec=screenRecRef.current||plain;
-              drawQuad(gl,srec,rt,vt,srecUni);
+              // uEdge:0 — phone body already provides the border; recording edge vignette
+              // would create a visible double-border ring on top of the bezel.
+              drawQuad(gl,srec,rt,vt,{...srecUni,uEdge:0});
               if(mReadyRef.current){
                 const cUni={
                   uKey:keyClrRef.current,uThresh:keyTRef.current,
@@ -1292,12 +1294,14 @@ export default function App(){
               drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
             }
           } else if((lk>0.001||ck>0.001) && mReadyRef.current && blendRef.current){
-            // Color Key / Dark Screen: FRAG_BLEND samples recording at canvas UV scale
-            // (correct size, not warped). Pin quad clips the blend — outside pins = opaque mockup,
-            // inside pins = green/dark pixels reveal recording, non-green stays as mockup.
+            // Color Key / Dark Screen: FRAG_BLEND samples recording at canvas UV scale.
+            // For chroma, pass the real threshold (keyTRef) not the tiny toggle value (ck=0.12).
+            // Using ck as threshold was keying almost nothing — green barely removed.
             const crop=coverUVBounds(rW,rH,W,H);
+            const blendChroma = ck>0.001 ? keyTRef.current : 0;
+            const blendSoft   = ck>0.001 ? keySRef.current : ls;
             drawQuad(gl,blendRef.current,mt,bgVerts(),
-              {...pinUV,uLuma:lk,uLumaSoft:ls,uChroma:ck,uChromaKey:keyClrRef.current,uRecCrop:crop},rt);
+              {...pinUV,uLuma:lk,uLumaSoft:blendSoft,uChroma:blendChroma,uChromaKey:keyClrRef.current,uRecCrop:crop},rt);
           } else {
             const vt=pinVerts(np,W,H);
             if(vt){
