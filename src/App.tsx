@@ -40,48 +40,59 @@ uniform vec3 uKey;
 uniform float uThresh;
 uniform float uSoft;
 uniform float uSpill;
+uniform float uUseQuad;
+uniform vec2 uQ0, uQ1, uQ2, uQ3;
 varying vec3 vUVW;
+float cr2(vec2 a, vec2 b){ return a.x*b.y - a.y*b.x; }
 void main() {
   vec2 uv = vUVW.xy / vUVW.z;
   vec4 c = texture2D(uTex, uv);
   vec3 col = c.rgb;
 
-  // Angle-weighted distance in RGB space
+  // Strict quad boundary: outside pin corners → fully opaque, no chroma removal.
+  // This prevents recording from bleeding through green fringe OUTSIDE the screen corners.
+  if(uUseQuad > 0.5) {
+    float d0=cr2(uQ1-uQ0,uv-uQ0), d1=cr2(uQ2-uQ1,uv-uQ1);
+    float d2=cr2(uQ3-uQ2,uv-uQ2), d3=cr2(uQ0-uQ3,uv-uQ3);
+    bool ins=(d0>=0.0&&d1>=0.0&&d2>=0.0&&d3>=0.0)||(d0<=0.0&&d1<=0.0&&d2<=0.0&&d3<=0.0);
+    if(!ins){ gl_FragColor=vec4(col,1.0); return; }
+  }
+
   float cLen = max(0.001, length(col));
   float kLen = max(0.001, length(uKey));
   float cosA = dot(col/cLen, uKey/kLen);
   float dist = distance(col, uKey);
   float combined = dist * (1.0 + max(0.0, 1.0 - cosA) * 0.5);
 
-  // Saturation gate — protect desaturated/dark pixels (reflections, shadows, bezel)
   float maxC = max(col.r, max(col.g, col.b));
   float minC = min(col.r, min(col.g, col.b));
   float sat = maxC > 0.001 ? (maxC - minC) / maxC : 0.0;
-  float satGate = smoothstep(0.06, 0.22, sat); // <6% sat = fully preserve
+  float lum0 = dot(col, vec3(0.2126, 0.7152, 0.0722));
+
+  // Luma gate on alpha only — dark pixels (gloves, bezel) stay fully opaque even with
+  // green light bounce. Without this they go semi-transparent over dark recording → green tint.
+  float lumaGate = smoothstep(0.05, 0.28, lum0);
+  float satGate = smoothstep(0.06, 0.22, sat) * lumaGate;
 
   float rawAlpha = smoothstep(uThresh - uSoft, uThresh + uSoft, combined);
-  // Sharpen alpha: push partial-transparency pixels toward fully transparent
-  // Eliminates soft green fringe on screen edges without affecting opaque bezel/body
   float sharpAlpha = rawAlpha * rawAlpha * (3.0 - 2.0 * rawAlpha);
   float alpha = mix(1.0, sharpAlpha, satGate);
 
-  // Luminance-preserving spill suppression (uSpill = user despill strength)
-  float spill = (1.0 - rawAlpha) * satGate * uSpill;
-  if(spill > 0.001) {
-    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+  // Global despill — applies to ALL pixels with key-color excess, not just partially-keyed ones.
+  // Previous version only ran on (1-rawAlpha) pixels, missing opaque dark areas with green bounce.
+  // No luminance normalization here: normalizing dark pixels amplifies them into a bright green ring.
+  if(uSpill > 0.001) {
+    float satW = smoothstep(0.06, 0.22, sat); // only despill saturated pixels
     if(uKey.g >= uKey.r && uKey.g >= uKey.b) {
       float excess = col.g - max(col.r, col.b);
-      col.g -= max(0.0, excess) * spill * 0.95;
+      if(excess > 0.01) col.g -= excess * min(1.0, excess * 4.0) * satW * uSpill * 0.90;
     } else if(uKey.b >= uKey.r) {
       float excess = col.b - max(col.r, col.g);
-      col.b -= max(0.0, excess) * spill * 0.95;
+      if(excess > 0.01) col.b -= excess * min(1.0, excess * 4.0) * satW * uSpill * 0.90;
     } else {
       float excess = col.r - max(col.g, col.b);
-      col.r -= max(0.0, excess) * spill * 0.95;
+      if(excess > 0.01) col.r -= excess * min(1.0, excess * 4.0) * satW * uSpill * 0.90;
     }
-    // Restore original luminance to prevent darkening at edges
-    float newLum = dot(col, vec3(0.2126, 0.7152, 0.0722));
-    if(newLum > 0.001) col *= lum / newLum;
   }
 
   gl_FragColor = vec4(clamp(col, 0.0, 1.0), alpha);
@@ -1256,21 +1267,34 @@ export default function App(){
           const uCamPos:[number,number]=[camXRef.current,camYRef.current];
           const srecUni={uEdge:ue,uRx,uRy,uCamPos,uCamR,uCamAsp};
 
-          if(punchThroughRef.current && cutoutRef.current){
-            // Punch-through: recording below, mockup screen cut out on top → hand stays in front
+          if(punchThroughRef.current){
+            // Punch-Through: recording warped to exact pin corners (pinVerts),
+            // mockup drawn on top with chroma — use this when you want the recording
+            // to fill exactly the 4 corner positions you've set.
             const vt=pinVerts(np,W,H);
             if(vt){
               const srec=screenRecRef.current||plain;
               drawQuad(gl,srec,rt,vt,srecUni);
               if(mReadyRef.current){
-                drawQuad(gl,cutoutRef.current,mt,bgVerts(),{...pinUV,uOpacity:mop});
+                const cUni={
+                  uKey:keyClrRef.current,uThresh:keyTRef.current,
+                  uSoft:keySRef.current,uSpill:keySpillRef.current,
+                  uUseQuad:1.0,
+                  uQ0:[np[0].x/W,1-np[0].y/H] as [number,number],
+                  uQ1:[np[1].x/W,1-np[1].y/H] as [number,number],
+                  uQ2:[np[2].x/W,1-np[2].y/H] as [number,number],
+                  uQ3:[np[3].x/W,1-np[3].y/H] as [number,number],
+                };
+                drawQuad(gl,chroma,mt,bgVerts(),cUni);
               }
               if(screenFxRef.current) drawQuad(gl,screenFxRef.current,rt,vt,{});
             } else if(mReadyRef.current){
               drawQuad(gl,plain,mt,bgVerts(),{uEdge:0,uOpacity:mop});
             }
           } else if((lk>0.001||ck>0.001) && mReadyRef.current && blendRef.current){
-            // Luma/chroma blend: single-pass, always opaque — no bleed possible
+            // Color Key / Dark Screen: FRAG_BLEND samples recording at canvas UV scale
+            // (correct size, not warped). Pin quad clips the blend — outside pins = opaque mockup,
+            // inside pins = green/dark pixels reveal recording, non-green stays as mockup.
             const crop=coverUVBounds(rW,rH,W,H);
             drawQuad(gl,blendRef.current,mt,bgVerts(),
               {...pinUV,uLuma:lk,uLumaSoft:ls,uChroma:ck,uChromaKey:keyClrRef.current,uRecCrop:crop},rt);
@@ -1294,7 +1318,7 @@ export default function App(){
       } else {
         // AUTO mode: recording below, mockup WITH chroma key on top masks to screen only.
         const ac=screenCornersRef.current;
-        const cUni={uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current};
+        const cUni={uKey:keyClrRef.current,uThresh:keyTRef.current,uSoft:keySRef.current,uSpill:keySpillRef.current,uUseQuad:0.0};
         const placement=autoPlacementRef.current;
         const scl=autoRecScaleRef.current;
 
@@ -1610,6 +1634,29 @@ export default function App(){
     setMockupIsV(isV); setMockupSrc(URL.createObjectURL(file)); setMockupFile(file.name);
     setTplScreenFrac(null); // clear template lock when user uploads their own
   },[]);
+
+  // One-click: snap recording size to the auto-detected green screen bounds
+  const snapToScreen=useCallback(()=>{
+    const sb=screenBoundsRef.current;
+    if(!sb) return;
+    // scaleW/scaleH = canvas fraction (recording canvas width = scaleW * W)
+    setAutoFitScaleW(Math.min(0.79, sb.x1-sb.x0));
+    setAutoFitScaleH(Math.min(0.79, sb.y1-sb.y0));
+    setAutoFitY(Math.min(0.9, Math.max(0.1, (sb.y0+sb.y1)/2)));
+    setAutoPlacement('fit');
+  },[]);
+
+  const snapPinsToScreen=useCallback(()=>{
+    const sb=screenBoundsRef.current;
+    if(!sb||csz.w<=0||csz.h<=0) return;
+    const newPins: Quad=[
+      {x:sb.x0*csz.w, y:sb.y0*csz.h},
+      {x:sb.x1*csz.w, y:sb.y0*csz.h},
+      {x:sb.x1*csz.w, y:sb.y1*csz.h},
+      {x:sb.x0*csz.w, y:sb.y1*csz.h},
+    ];
+    setPins(newPins); pinsRef.current=newPins;
+  },[csz]);
 
   const selectTemplate=useCallback(async(id:TplId)=>{
     const {url,frac}=await buildBuiltinTemplate(id,'#00ff00');
@@ -2216,6 +2263,11 @@ export default function App(){
                   <p style={{fontSize:10.5,color:'var(--muted)',lineHeight:1.6,marginBottom:8}}>
                     Drag 4 handles onto the device screen corners.
                   </p>
+                  <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:11,
+                    marginBottom:6,background:'rgba(91,246,167,0.10)',border:'1px solid rgba(91,246,167,0.30)',color:'rgba(91,246,167,1)'}}
+                    onClick={snapPinsToScreen}>
+                    ⚡ Detect Screen → Set Pins
+                  </button>
                   <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:11,marginBottom:12}}
                     onClick={()=>setPins(defaultCorners(csz.w,csz.h))}>Reset pins</button>
 
@@ -2545,9 +2597,12 @@ export default function App(){
                   </div>
                   {autoPlacement==='fit'&&(
                     <>
-                      <p style={{fontSize:9.5,color:'rgba(91,156,246,0.9)',lineHeight:1.5,marginBottom:6}}>
-                        Adjust Width + Height independently to fill the phone screen exactly.
-                      </p>
+                      <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',
+                        fontSize:11,marginBottom:8,background:'rgba(91,156,246,0.12)',
+                        border:'1px solid rgba(91,156,246,0.3)',color:'rgba(91,156,246,1)'}}
+                        onClick={snapToScreen}>
+                        ⚡ Snap to Screen (auto-size)
+                      </button>
                       <div className="sl-lbl" style={{marginBottom:2}}>
                         <span>Width</span><span>{Math.round(autoFitScaleW*200)}%</span>
                       </div>
